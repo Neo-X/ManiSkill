@@ -17,6 +17,7 @@ from torch.utils.tensorboard import SummaryWriter
 # ManiSkill specific imports
 import mani_skill.envs
 from mani_skill.utils import gym_utils
+from mani_skill.utils.wrappers.gymnasium import CPUGymWrapper
 from mani_skill.utils.wrappers.flatten import FlattenActionSpaceWrapper
 from mani_skill.utils.wrappers.record import RecordEpisode
 from mani_skill.vector.wrappers.gymnasium import ManiSkillVectorEnv
@@ -102,6 +103,8 @@ class Args:
     save_train_video_freq: Optional[int] = None
     """frequency to save training videos in terms of iterations"""
     finite_horizon_gae: bool = False
+    use_async_vector_env: bool = False
+    """if toggled, use gym.vector.AsyncVectorEnv/SyncVectorEnv over ManiSkill internal vectorization"""
 
 
     # to be filled in runtime
@@ -161,7 +164,7 @@ class Agent(nn.Module):
         return action, probs.log_prob(action).sum(1), probs.entropy().sum(1), self.critic(x)
 
 class Logger:
-    def __init__(self, log_wandb=False, tensorboard: SummaryWriter = None) -> None:
+    def __init__(self, log_wandb=False, tensorboard: Optional[SummaryWriter] = None) -> None:
         self.writer = tensorboard
         self.log_wandb = log_wandb
     def add_scalar(self, tag, scalar_value, step):
@@ -192,28 +195,104 @@ if __name__ == "__main__":
     device = torch.device("cuda" if torch.cuda.is_available() and args.cuda else "cpu")
 
     # env setup
-    env_kwargs = dict(obs_mode="state", render_mode="rgb_array", sim_backend="physx_cpu")
+    env_kwargs: dict[str, object] = dict(obs_mode="state", render_mode="rgb_array", sim_backend="physx_cpu")
     if args.control_mode is not None:
         env_kwargs["control_mode"] = args.control_mode
-    envs = gym.make(args.env_id, num_envs=args.num_envs if not args.evaluate else 1, reconfiguration_freq=args.reconfiguration_freq, **env_kwargs)
+
+    probe_env = gym.make(args.env_id, **env_kwargs)
+    max_episode_steps = gym_utils.find_max_episode_steps_value(probe_env)
+    probe_env.close()
+
+    train_num_envs = args.num_envs if not args.evaluate else 1
     eval_envs = gym.make(args.env_id, num_envs=args.num_eval_envs, reconfiguration_freq=args.eval_reconfiguration_freq, **env_kwargs)
-    if isinstance(envs.action_space, gym.spaces.Dict):
-        envs = FlattenActionSpaceWrapper(envs)
+    if isinstance(eval_envs.action_space, gym.spaces.Dict):
         eval_envs = FlattenActionSpaceWrapper(eval_envs)
+    if not args.use_async_vector_env:
+        envs = gym.make(args.env_id, num_envs=train_num_envs, reconfiguration_freq=args.reconfiguration_freq, **env_kwargs)
+        # eval_envs = gym.make(args.env_id, num_envs=args.num_eval_envs, reconfiguration_freq=args.eval_reconfiguration_freq, **env_kwargs)
+        if isinstance(envs.action_space, gym.spaces.Dict):
+            envs = FlattenActionSpaceWrapper(envs)
+            # eval_envs = FlattenActionSpaceWrapper(eval_envs)
+    else:
+        def _make_cpu_env(seed: int, reconfiguration_freq: Optional[int], ignore_terminations: bool):
+            def _thunk():
+                env = gym.make(args.env_id, reconfiguration_freq=reconfiguration_freq, **env_kwargs)
+                if isinstance(env.action_space, gym.spaces.Dict):
+                    env = FlattenActionSpaceWrapper(env)
+                env = CPUGymWrapper(env, ignore_terminations=ignore_terminations, record_metrics=True)
+                env.action_space.seed(seed)
+                env.observation_space.seed(seed)
+                return env
+
+            return _thunk
+
+        train_vector_cls = gym.vector.SyncVectorEnv if train_num_envs == 1 else lambda x: gym.vector.AsyncVectorEnv(x, context="forkserver")
+        # eval_vector_cls = gym.vector.SyncVectorEnv if args.num_eval_envs == 1 else lambda x: gym.vector.AsyncVectorEnv(x, context="forkserver")
+
+        envs = train_vector_cls([
+            _make_cpu_env(seed=args.seed + i, reconfiguration_freq=args.reconfiguration_freq, ignore_terminations=not args.partial_reset)
+            for i in range(train_num_envs)
+        ])
+        # eval_envs = eval_vector_cls([
+        #     _make_cpu_env(seed=args.seed + 100000 + i, reconfiguration_freq=args.eval_reconfiguration_freq, ignore_terminations=not args.eval_partial_reset)
+        #     for i in range(args.num_eval_envs)
+        # ])
+
+
     if args.capture_video:
         eval_output_dir = f"runs/{run_name}/videos"
         if args.evaluate:
+            assert args.checkpoint is not None
             eval_output_dir = f"{os.path.dirname(args.checkpoint)}/test_videos"
         print(f"Saving eval videos to {eval_output_dir}")
         if args.save_train_video_freq is not None:
             save_video_trigger = lambda x : (x // args.num_steps) % args.save_train_video_freq == 0
             envs = RecordEpisode(envs, output_dir=f"runs/{run_name}/train_videos", save_trajectory=False, save_video_trigger=save_video_trigger, max_steps_per_video=args.num_steps, video_fps=30)
         eval_envs = RecordEpisode(eval_envs, output_dir=eval_output_dir, save_trajectory=args.evaluate, trajectory_name="trajectory", max_steps_per_video=args.num_eval_steps, video_fps=30)
-    envs = ManiSkillVectorEnv(envs, args.num_envs, ignore_terminations=not args.partial_reset, record_metrics=True)
-    eval_envs = ManiSkillVectorEnv(eval_envs, args.num_eval_envs, ignore_terminations=not args.eval_partial_reset, record_metrics=True)
+    if not args.use_async_vector_env:
+        envs = ManiSkillVectorEnv(envs, args.num_envs, ignore_terminations=not args.partial_reset, record_metrics=True)
+        eval_envs = ManiSkillVectorEnv(eval_envs, args.num_eval_envs, ignore_terminations=not args.eval_partial_reset, record_metrics=True)
     assert isinstance(envs.single_action_space, gym.spaces.Box), "only continuous action space is supported"
 
-    max_episode_steps = gym_utils.find_max_episode_steps_value(envs._env)
+    def to_tensor(x):
+        if isinstance(x, torch.Tensor):
+            return x.to(device)
+        return torch.as_tensor(x, device=device)
+
+    def select_by_mask(x, mask: torch.Tensor):
+        if isinstance(x, torch.Tensor):
+            return x[mask]
+        if isinstance(x, list):
+            x = np.asarray(x, dtype=object)
+        return x[mask.cpu().numpy()]
+
+    def extract_episode_metrics(info_dict, mask: torch.Tensor) -> dict[str, torch.Tensor]:
+        # ManiSkillVectorEnv emits dict-of-batched-values, while Gym AsyncVectorEnv can emit
+        # a per-environment object array for final_info.
+        final_info = info_dict["final_info"]
+        if isinstance(final_info, dict) and "episode" in final_info and isinstance(final_info["episode"], dict):
+            metrics = {}
+            for k, v in final_info["episode"].items():
+                vals = to_tensor(select_by_mask(v, mask)).reshape(-1)
+                if vals.numel() > 0:
+                    metrics[k] = vals
+            return metrics
+
+        mask_np = mask.cpu().numpy()
+        aggregated = defaultdict(list)
+        final_info_arr = final_info
+        if isinstance(final_info_arr, list):
+            final_info_arr = np.asarray(final_info_arr, dtype=object)
+        for i, done in enumerate(mask_np):
+            if not done:
+                continue
+            env_info = final_info_arr[i]
+            if env_info is None or "episode" not in env_info:
+                continue
+            for k, v in env_info["episode"].items():
+                aggregated[k].append(v)
+        return {k: to_tensor(np.asarray(v)).reshape(-1) for k, v in aggregated.items()}
+
     logger = None
     if not args.evaluate:
         print("Running training")
@@ -257,6 +336,8 @@ if __name__ == "__main__":
     start_time = time.time()
     next_obs, _ = envs.reset(seed=args.seed)
     eval_obs, _ = eval_envs.reset(seed=args.seed)
+    next_obs = to_tensor(next_obs)
+    eval_obs = to_tensor(eval_obs)
     next_done = torch.zeros(args.num_envs, device=device)
     print(f"####")
     print(f"args.num_iterations={args.num_iterations} args.num_envs={args.num_envs} args.num_eval_envs={args.num_eval_envs}")
@@ -281,14 +362,15 @@ if __name__ == "__main__":
             for _ in range(args.num_eval_steps):
                 with torch.no_grad():
                     eval_obs, eval_rew, eval_terminations, eval_truncations, eval_infos = eval_envs.step(agent.get_action(eval_obs, deterministic=True))
+                    eval_obs = to_tensor(eval_obs)
                     if "final_info" in eval_infos:
-                        mask = eval_infos["_final_info"]
-                        num_episodes += mask.sum()
-                        for k, v in eval_infos["final_info"]["episode"].items():
-                            eval_metrics[k].append(v)
+                        mask = to_tensor(eval_infos["_final_info"]).to(torch.bool)
+                        num_episodes += int(mask.sum().item())
+                        for k, vals in extract_episode_metrics(eval_infos, mask).items():
+                            eval_metrics[k].append(vals)
             print(f"Evaluated {args.num_eval_steps * args.num_eval_envs} steps resulting in {num_episodes} episodes")
             for k, v in eval_metrics.items():
-                mean = torch.stack(v).float().mean()
+                mean = torch.cat(v).float().mean()
                 if logger is not None:
                     logger.add_scalar(f"eval/{k}", mean, global_step)
                 print(f"eval_{k}_mean={mean}")
@@ -319,16 +401,21 @@ if __name__ == "__main__":
 
             # TRY NOT TO MODIFY: execute the game and log data.
             next_obs, reward, terminations, truncations, infos = envs.step(clip_action(action))
+            next_obs = to_tensor(next_obs)
+            reward = to_tensor(reward)
+            terminations = to_tensor(terminations)
+            truncations = to_tensor(truncations)
             next_done = torch.logical_or(terminations, truncations).to(torch.float32)
             rewards[step] = reward.view(-1) * args.reward_scale
 
             if "final_info" in infos:
-                final_info = infos["final_info"]
-                done_mask = infos["_final_info"]
-                for k, v in final_info["episode"].items():
-                    logger.add_scalar(f"train/{k}", v[done_mask].float().mean(), global_step)
+                done_mask = to_tensor(infos["_final_info"]).to(torch.bool)
+                for k, metric_vals in extract_episode_metrics(infos, done_mask).items():
+                    if metric_vals.numel() > 0:
+                        logger.add_scalar(f"train/{k}", metric_vals.float().mean(), global_step)
                 with torch.no_grad():
-                    final_values[step, torch.arange(args.num_envs, device=device)[done_mask]] = agent.get_value(infos["final_observation"][done_mask]).view(-1)
+                    final_obs = to_tensor(select_by_mask(infos["final_observation"], done_mask))
+                    final_values[step, torch.arange(args.num_envs, device=device)[done_mask]] = agent.get_value(final_obs).view(-1)
         rollout_time = time.time() - rollout_time
         # bootstrap value according to termination and truncation
         with torch.no_grad():
