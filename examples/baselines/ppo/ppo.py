@@ -53,15 +53,15 @@ class Args:
     """total timesteps of the experiments"""
     learning_rate: float = 3e-4
     """the learning rate of the optimizer"""
-    num_envs: int = 512
+    num_envs: int = 1
     """the number of parallel environments"""
-    num_eval_envs: int = 8
+    num_eval_envs: int = 1
     """the number of parallel evaluation environments"""
     partial_reset: bool = True
     """whether to let parallel environments reset upon termination instead of truncation"""
     eval_partial_reset: bool = False
     """whether to let parallel evaluation environments reset upon termination instead of truncation"""
-    num_steps: int = 50
+    num_steps: int = 1024
     """the number of steps to run in each environment per policy rollout"""
     num_eval_steps: int = 50
     """the number of steps to run in each evaluation environment during evaluation"""
@@ -123,20 +123,20 @@ class Agent(nn.Module):
         super().__init__()
         self.critic = nn.Sequential(
             layer_init(nn.Linear(np.array(envs.single_observation_space.shape).prod(), 256)),
-            nn.Tanh(),
+            nn.ReLU(),
             layer_init(nn.Linear(256, 256)),
-            nn.Tanh(),
+            nn.ReLU(),
             layer_init(nn.Linear(256, 256)),
-            nn.Tanh(),
+            nn.ReLU(),
             layer_init(nn.Linear(256, 1)),
         )
         self.actor_mean = nn.Sequential(
             layer_init(nn.Linear(np.array(envs.single_observation_space.shape).prod(), 256)),
-            nn.Tanh(),
+            nn.ReLU(),
             layer_init(nn.Linear(256, 256)),
-            nn.Tanh(),
+            nn.ReLU(),
             layer_init(nn.Linear(256, 256)),
-            nn.Tanh(),
+            nn.ReLU(),
             layer_init(nn.Linear(256, np.prod(envs.single_action_space.shape)), std=0.01*np.sqrt(2)),
         )
         self.actor_logstd = nn.Parameter(torch.ones(1, np.prod(envs.single_action_space.shape)) * -0.5)
@@ -192,7 +192,7 @@ if __name__ == "__main__":
     device = torch.device("cuda" if torch.cuda.is_available() and args.cuda else "cpu")
 
     # env setup
-    env_kwargs = dict(obs_mode="state", render_mode="rgb_array", sim_backend="physx_cuda")
+    env_kwargs = dict(obs_mode="state", render_mode="rgb_array", sim_backend="physx_cpu")
     if args.control_mode is not None:
         env_kwargs["control_mode"] = args.control_mode
     envs = gym.make(args.env_id, num_envs=args.num_envs if not args.evaluate else 1, reconfiguration_freq=args.reconfiguration_freq, **env_kwargs)
