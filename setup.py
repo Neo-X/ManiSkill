@@ -1,3 +1,10 @@
+"""
+This setup.py is maintained for backward compatibility.
+The project now uses uv and pyproject.toml for dependency management.
+For new installations, use: uv pip install -e .
+For PyTorch with CUDA 12.4 support (required for Tesla V100):
+  uv pip install -e ".[pytorch]"
+"""
 import argparse
 import datetime
 import sys
