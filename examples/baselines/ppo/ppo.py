@@ -48,7 +48,7 @@ class Args:
     """path to a pretrained checkpoint file to start evaluation/training from"""
 
     # Algorithm specific arguments
-    env_id: str = "PickCube-v1"
+    env_id: str = "assemblingkits-v1"
     """the id of the environment"""
     total_timesteps: int = 10000000
     """total timesteps of the experiments"""
@@ -195,7 +195,7 @@ if __name__ == "__main__":
     device = torch.device("cuda" if torch.cuda.is_available() and args.cuda else "cpu")
 
     # env setup
-    env_kwargs: dict[str, object] = dict(obs_mode="state", render_mode="rgb_array", sim_backend="physx_cuda")
+    env_kwargs: dict[str, object] = dict(obs_mode="state", render_mode="rgb_array", sim_backend="physx_cpu")
     if args.control_mode is not None:
         env_kwargs["control_mode"] = args.control_mode
 
