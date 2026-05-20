@@ -48,7 +48,7 @@ class Args:
     """path to a pretrained checkpoint file to start evaluation/training from"""
 
     # Algorithm specific arguments
-    env_id: str = "assemblingkits-v1"
+    env_id: str = "PushText-v1"
     """the id of the environment"""
     total_timesteps: int = 10000000
     """total timesteps of the experiments"""
@@ -204,39 +204,38 @@ if __name__ == "__main__":
     probe_env.close()
 
     train_num_envs = args.num_envs if not args.evaluate else 1
-    eval_envs = gym.make(args.env_id, num_envs=args.num_eval_envs, reconfiguration_freq=args.eval_reconfiguration_freq, **env_kwargs)
-    if isinstance(eval_envs.action_space, gym.spaces.Dict):
-        eval_envs = FlattenActionSpaceWrapper(eval_envs)
+
+    def _make_cpu_env(seed: int, reconfiguration_freq: Optional[int], ignore_terminations: bool):
+        def _thunk():
+            env = gym.make(args.env_id, reconfiguration_freq=reconfiguration_freq, **env_kwargs)
+            if isinstance(env.action_space, gym.spaces.Dict):
+                env = FlattenActionSpaceWrapper(env)
+            env = CPUGymWrapper(env, ignore_terminations=ignore_terminations, record_metrics=True)
+            env.action_space.seed(seed)
+            env.observation_space.seed(seed)
+            return env
+        return _thunk
+
     if not args.use_async_vector_env:
         envs = gym.make(args.env_id, num_envs=train_num_envs, reconfiguration_freq=args.reconfiguration_freq, **env_kwargs)
-        # eval_envs = gym.make(args.env_id, num_envs=args.num_eval_envs, reconfiguration_freq=args.eval_reconfiguration_freq, **env_kwargs)
+        eval_envs = gym.make(args.env_id, num_envs=args.num_eval_envs, reconfiguration_freq=args.eval_reconfiguration_freq, **env_kwargs)
         if isinstance(envs.action_space, gym.spaces.Dict):
             envs = FlattenActionSpaceWrapper(envs)
-            # eval_envs = FlattenActionSpaceWrapper(eval_envs)
+        if isinstance(eval_envs.action_space, gym.spaces.Dict):
+            eval_envs = FlattenActionSpaceWrapper(eval_envs)
     else:
-        def _make_cpu_env(seed: int, reconfiguration_freq: Optional[int], ignore_terminations: bool):
-            def _thunk():
-                env = gym.make(args.env_id, reconfiguration_freq=reconfiguration_freq, **env_kwargs)
-                if isinstance(env.action_space, gym.spaces.Dict):
-                    env = FlattenActionSpaceWrapper(env)
-                env = CPUGymWrapper(env, ignore_terminations=ignore_terminations, record_metrics=True)
-                env.action_space.seed(seed)
-                env.observation_space.seed(seed)
-                return env
-
-            return _thunk
-
+        # CPU multiprocessing path — each env is a separate process
         train_vector_cls = gym.vector.SyncVectorEnv if train_num_envs == 1 else lambda x: gym.vector.AsyncVectorEnv(x, context="forkserver")
-        # eval_vector_cls = gym.vector.SyncVectorEnv if args.num_eval_envs == 1 else lambda x: gym.vector.AsyncVectorEnv(x, context="forkserver")
+        eval_vector_cls = gym.vector.SyncVectorEnv if args.num_eval_envs == 1 else lambda x: gym.vector.AsyncVectorEnv(x, context="forkserver")
 
         envs = train_vector_cls([
             _make_cpu_env(seed=args.seed + i, reconfiguration_freq=args.reconfiguration_freq, ignore_terminations=not args.partial_reset)
             for i in range(train_num_envs)
         ])
-        # eval_envs = eval_vector_cls([
-        #     _make_cpu_env(seed=args.seed + 100000 + i, reconfiguration_freq=args.eval_reconfiguration_freq, ignore_terminations=not args.eval_partial_reset)
-        #     for i in range(args.num_eval_envs)
-        # ])
+        eval_envs = eval_vector_cls([
+            _make_cpu_env(seed=args.seed + 100000 + i, reconfiguration_freq=args.eval_reconfiguration_freq, ignore_terminations=not args.eval_partial_reset)
+            for i in range(args.num_eval_envs)
+        ])
 
 
     if args.capture_video:
@@ -357,18 +356,32 @@ if __name__ == "__main__":
         if iteration % args.eval_freq == 1:
             print("Evaluating")
             eval_obs, _ = eval_envs.reset()
+            eval_obs = to_tensor(eval_obs)
             eval_metrics = defaultdict(list)
+            eval_step_rewards = []
+            eval_step_successes = []
             num_episodes = 0
             for _ in range(args.num_eval_steps):
                 with torch.no_grad():
                     eval_obs, eval_rew, eval_terminations, eval_truncations, eval_infos = eval_envs.step(agent.get_action(eval_obs, deterministic=True))
                     eval_obs = to_tensor(eval_obs)
+                    eval_step_rewards.append(to_tensor(eval_rew).float().mean().item())
+                    if "success" in eval_infos:
+                        eval_step_successes.append(to_tensor(eval_infos["success"]).float().mean().item())
                     if "final_info" in eval_infos:
                         mask = to_tensor(eval_infos["_final_info"]).to(torch.bool)
                         num_episodes += int(mask.sum().item())
                         for k, vals in extract_episode_metrics(eval_infos, mask).items():
                             eval_metrics[k].append(vals)
             print(f"Evaluated {args.num_eval_steps * args.num_eval_envs} steps resulting in {num_episodes} episodes")
+            if logger is not None:
+                mean_rew = float(np.mean(eval_step_rewards))
+                logger.add_scalar("eval/mean_reward", mean_rew, global_step)
+                print(f"eval_mean_reward={mean_rew:.4f}")
+                if eval_step_successes:
+                    mean_succ = float(np.mean(eval_step_successes))
+                    logger.add_scalar("eval/success_rate", mean_succ, global_step)
+                    print(f"eval_success_rate={mean_succ:.4f}")
             for k, v in eval_metrics.items():
                 mean = torch.cat(v).float().mean()
                 if logger is not None:

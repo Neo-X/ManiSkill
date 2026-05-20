@@ -4,25 +4,25 @@
 
 Build a ManiSkill task environment called **PushText-v1** for robotic letter-spelling research.
 
-The robot must push flat letter tiles (like fridge magnets) on a white table into a target row that spells a given goal word. This serves as a simpler proxy for LEGO assembly — structured manipulation toward a language-specified goal.
+The robot must pick up and place fridge-magnet-style letter tiles on a white table to spell a target word. This serves as a simpler proxy for LEGO assembly — structured manipulation toward a language-specified goal.
 
 ---
 
 ## Task Design
 
-**Object geometry:** Flat rectangular tiles (0.05 × 0.05 × 0.006 m), one per letter in the goal word. Each letter has a distinct color. Ghost (semi-transparent) target tiles mark where each letter should end up.
+**Object geometry:** Real letter-shaped OBJ meshes (40mm tall, 12mm thick), extracted from `assets/objects/Alphabet.stl` and `assets/objects/numbers.stl`. Ghost (semi-transparent) target markers show target positions.
 
-**Robot:** PandaStick (same as Push-T). Designed to be easy to upgrade to bi-manual (two PandaStick arms) for longer words.
+**Robot:** `panda_wristcam` (full gripper — can pick, place, and push).
 
-**Goal specification:** A text string (e.g. `"HI"`, `"CAT"`) passed at env construction. Exposed as `get_language_instruction()` for VLA consumption.
+**Goal specification:** A text string (e.g. `"AT"`, `"CAT"`) passed at env construction. Exposed via `get_language_instruction()` for VLA consumption.
 
-**Target layout:** Letters arranged left-to-right in a centered row on the table, spaced 0.07 m apart.
+**Target layout:** Letters arranged left-to-right in a centered row on the table, spaced 0.065 m apart.
 
-**Randomization:** Each letter tile spawns at a random (x, y) position and random z-rotation each episode.
+**Randomization:** Each letter tile spawns at a random (x, y, z-rotation) each episode, with non-overlapping placement via `UniformPlacementSampler`.
 
-**Success:** Every letter within 0.025 m of its target position.
+**Success:** Every letter within 0.025 m of its target, stationary, and released by gripper.
 
-**Reward:** Sum of per-letter `(1 - tanh(5 * dist))^2` placement rewards + small TCP-to-nearest-letter shaping term. Max reward = 2.0 (normalized to 1.0).
+**Reward:** Staged per-letter reward (reach → grasp → place → release), summed across letters. Mirrors StackCube-v1 structure. Max raw = n_letters × 8, normalized to [0, 1].
 
 ---
 
@@ -30,8 +30,46 @@ The robot must push flat letter tiles (like fridge magnets) on a white table int
 
 | File | Purpose |
 |------|---------|
-| `mani_skill/envs/tasks/tabletop/push_text.py` | Main environment class |
-| `mani_skill/envs/tasks/tabletop/__init__.py` | Register `PushTextEnv` import |
+| `mani_skill/envs/tasks/tabletop/push_text.py` | Main environment class (`PushText-v1`) |
+| `mani_skill/envs/tasks/tabletop/__init__.py` | Registers `PushTextEnv` |
+| `mani_skill/assets/objects/letters/` | Per-letter OBJ + STL meshes (A–Z, 0–9) |
+| `scripts/extract_letters.py` | Extracts A–Z from `Alphabet.stl` |
+| `examples/baselines/ppo/ppo.py` | PPO training script (default env changed to `PushText-v1`) |
+
+---
+
+## Commands
+
+**Render a random-action episode:**
+```bash
+.venv/bin/python -m mani_skill.examples.demo_random_action \
+  -e PushText-v1 --render-mode rgb_array -b cpu --record-dir /tmp/pushtext_out
+```
+
+**Train with PPO (CPU, 4 parallel envs):**
+```bash
+.venv/bin/python examples/baselines/ppo/ppo.py \
+  --use-async-vector-env \
+  --num-envs 8 \
+  --num-eval-envs 2 \
+  --num-steps 50 \
+  --num-eval-steps 200 \
+  --total-timesteps 2000000 \
+  --exp-name push-text-ppo
+```
+
+**Smoke-test (quick 50K steps):**
+```bash
+.venv/bin/python examples/baselines/ppo/ppo.py \
+  --use-async-vector-env \
+  --num-envs 4 \
+  --num-eval-envs 2 \
+  --num-steps 50 \
+  --num-eval-steps 200 \
+  --total-timesteps 50000 \
+  --exp-name push-text-smoke \
+  --no-capture-video
+```
 
 ---
 
@@ -40,10 +78,12 @@ The robot must push flat letter tiles (like fridge magnets) on a white table int
 - [x] Write `push_text.py` — based on StackCube-v1 (panda_wristcam, full gripper)
 - [x] Register in `tabletop/__init__.py`
 - [x] Import smoke-test passes
-- [x] Smoke-test: episode runs cleanly (`demo_random_action -e PushText-v1 --render-mode rgb_array -b cpu`) — rewards, dists, is_placed/is_grasped/is_static all flowing correctly
-- [ ] Verify reward goes to max on perfect placement
-- [ ] Add `get_language_instruction()` hook for VLA wrapper
-- [ ] Import geometry for all 26 alphabet letters (e.g. STL/OBJ meshes shaped like fridge magnet letters) and replace placeholder box tiles with real letter collision/visual meshes
+- [x] Render episode — A and T letter meshes visible, overhead camera, video at `/tmp/pushtext_at6/0.mp4`
+- [x] Extract A–Z letter meshes from `Alphabet.stl` → `assets/objects/letters/` (OBJ + STL, 40mm tall, 12mm thick)
+- [x] Extract 0–9 digit meshes from `numbers.stl` → same folder
+- [x] PPO training runs on CPU with async multiprocessing (~400 SPS with 4 envs)
+- [x] Verify reward goes to max on perfect placement — normalized=1.0, raw=n×8 on perfect teleport (`scripts/check_reward.py`)
+- [ ] Full training run (2M+ steps) and evaluate success rate
 - [ ] (Future) Randomise goal word per episode
 - [ ] (Future) Bi-manual variant: two panda_wristcam arms
 
@@ -51,7 +91,8 @@ The robot must push flat letter tiles (like fridge magnets) on a white table int
 
 ## Key Design Decisions
 
-- **Start from Push-T** — reuse `WhiteTableSceneBuilder`, `PandaStick`, and the same reward shaping style.
-- **Flat tiles not shaped letters** — correct letter geometry is hard to simulate stably; tiles are sufficient for the pushing task and VLA goal-specification research.
-- **Color = identity** — each letter character maps to a fixed color from an 8-color palette, making visual disambiguation straightforward.
-- **`goal_text` as constructor arg** — keeps the env simple; randomising the word per episode is a later extension.
+- **Based on StackCube-v1** — uses `panda_wristcam` (full gripper) so robot can pick, place, and push.
+- **Real letter geometry** — OBJ meshes from STL assets, loaded via `add_multiple_convex_collisions_from_file` + `add_visual_from_file`, following `AssemblingKits-v1` pattern.
+- **`PACKAGE_ASSET_DIR`** — uses ManiSkill's built-in asset path constant, not fragile relative path computation.
+- **Color = identity** — each letter maps to a fixed color from an 8-color palette.
+- **CPU PPO** — uses `--use-async-vector-env` for multiprocessing; eval loop fixed to convert numpy obs to tensors.
