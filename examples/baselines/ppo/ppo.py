@@ -12,7 +12,10 @@ import torch.nn as nn
 import torch.optim as optim
 import tyro
 from torch.distributions.normal import Normal
-from torch.utils.tensorboard import SummaryWriter
+try:
+    from torch.utils.tensorboard import SummaryWriter
+except ImportError:
+    SummaryWriter = None
 
 # ManiSkill specific imports
 import mani_skill.envs
@@ -170,9 +173,11 @@ class Logger:
     def add_scalar(self, tag, scalar_value, step):
         if self.log_wandb:
             wandb.log({tag: scalar_value}, step=step)
-        self.writer.add_scalar(tag, scalar_value, step)
+        if self.writer is not None:
+            self.writer.add_scalar(tag, scalar_value, step)
     def close(self):
-        self.writer.close()
+        if self.writer is not None:
+            self.writer.close()
 
 if __name__ == "__main__":
     args = tyro.cli(Args)
@@ -194,8 +199,10 @@ if __name__ == "__main__":
 
     device = torch.device("cuda" if torch.cuda.is_available() and args.cuda else "cpu")
 
-    # env setup
-    env_kwargs: dict[str, object] = dict(obs_mode="state", render_mode="rgb_array", sim_backend="physx_cpu")
+    # env setup — skip renderer when not capturing video (required for headless/Docker)
+    render_mode = "rgb_array" if args.capture_video else None
+    render_backend = "gpu" if args.capture_video else "none"
+    env_kwargs: dict[str, object] = dict(obs_mode="state", render_mode=render_mode, render_backend=render_backend, sim_backend="physx_cpu")
     if args.control_mode is not None:
         env_kwargs["control_mode"] = args.control_mode
 
@@ -263,7 +270,13 @@ if __name__ == "__main__":
             return x[mask]
         if isinstance(x, list):
             x = np.asarray(x, dtype=object)
-        return x[mask.cpu().numpy()]
+        selected = x[mask.cpu().numpy()]
+        # gymnasium 0.29 may return object arrays containing numpy arrays; stack them
+        if isinstance(selected, np.ndarray) and selected.dtype == object:
+            items = [o for o in selected if o is not None]
+            if items:
+                selected = np.stack(items).astype(np.float32)
+        return selected
 
     def extract_episode_metrics(info_dict, mask: torch.Tensor) -> dict[str, torch.Tensor]:
         # ManiSkillVectorEnv emits dict-of-batched-values, while Gym AsyncVectorEnv can emit
@@ -310,11 +323,14 @@ if __name__ == "__main__":
                 group="PPO",
                 tags=["ppo", "walltime_efficient"]
             )
-        writer = SummaryWriter(f"runs/{run_name}")
-        writer.add_text(
-            "hyperparameters",
-            "|param|value|\n|-|-|\n%s" % ("\n".join([f"|{key}|{value}|" for key, value in vars(args).items()])),
-        )
+        if SummaryWriter is not None:
+            writer = SummaryWriter(f"runs/{run_name}")
+            writer.add_text(
+                "hyperparameters",
+                "|param|value|\n|-|-|\n%s" % ("\n".join([f"|{key}|{value}|" for key, value in vars(args).items()])),
+            )
+        else:
+            writer = None
         logger = Logger(log_wandb=args.track, tensorboard=writer)
     else:
         print("Running evaluation")
@@ -391,6 +407,7 @@ if __name__ == "__main__":
                 break
         if args.save_model and iteration % args.eval_freq == 1:
             model_path = f"runs/{run_name}/ckpt_{iteration}.pt"
+            os.makedirs(f"runs/{run_name}", exist_ok=True)
             torch.save(agent.state_dict(), model_path)
             print(f"model saved to {model_path}")
         # Annealing the rate if instructed to do so.
@@ -563,6 +580,7 @@ if __name__ == "__main__":
     if not args.evaluate:
         if args.save_model:
             model_path = f"runs/{run_name}/final_ckpt.pt"
+            os.makedirs(f"runs/{run_name}", exist_ok=True)
             torch.save(agent.state_dict(), model_path)
             print(f"model saved to {model_path}")
         logger.close()
