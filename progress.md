@@ -81,11 +81,57 @@ The robot must pick up and place fridge-magnet-style letter tiles on a white tab
 - [x] Render episode — A and T letter meshes visible, overhead camera, video at `/tmp/pushtext_at6/0.mp4`
 - [x] Extract A–Z letter meshes from `Alphabet.stl` → `assets/objects/letters/` (OBJ + STL, 40mm tall, 12mm thick)
 - [x] Extract 0–9 digit meshes from `numbers.stl` → same folder
-- [x] PPO training runs on CPU with async multiprocessing (~400 SPS with 4 envs)
+- [x] PPO training runs on CPU with async multiprocessing (~1850 SPS with 32 envs)
 - [x] Verify reward goes to max on perfect placement — normalized=1.0, raw=n×8 on perfect teleport (`scripts/check_reward.py`)
-- [ ] Full training run (2M+ steps) and evaluate success rate
+- [x] Docker image built and pushed to `gberseth/maniskill-ppo:latest` (Docker Hub)
+- [x] Training confirmed working inside Docker container (headless, no GPU required)
+- [x] GCP spot instance hello-world test passing — self-deletes after job completes
+- [ ] Full training run (10M steps) on GCP spot instance
+- [ ] Evaluate success rate after full training
 - [ ] (Future) Randomise goal word per episode
 - [ ] (Future) Bi-manual variant: two panda_wristcam arms
+
+---
+
+---
+
+## Docker & GCP Deployment
+
+### Docker image: `gberseth/maniskill-ppo:latest`
+- Based on `nvidia/cudagl:11.3.1-devel-ubuntu20.04` (supports GPU via `--gpus all`)
+- Works **CPU-only** (no GPU) via null-render stubs in `mani_skill/envs/sapien_env.py`
+- `render_backend="none"` set automatically when `--no-capture-video` to skip Vulkan init
+- Bind-mounts needed at runtime (local source overrides PyPI install):
+  ```bash
+  docker run --rm -w /app \
+    -v $(pwd)/runs:/app/runs \
+    -v $(pwd)/examples:/examples \
+    -v $(pwd)/mani_skill:/opt/conda/lib/python3.9/site-packages/mani_skill \
+    gberseth/maniskill-ppo:latest python /examples/baselines/ppo/ppo.py \
+    --use-async-vector-env --num-envs 32 --no-capture-video \
+    --exp-name push-text-state-ppo
+  ```
+
+### GCP spot instance launcher: `scripts/launch_gcp_job.py`
+- Uses Debian 12 + installs Docker at startup
+- Self-deletes instance on job completion or crash via `trap self_delete EXIT`
+- Requires `roles/compute.instanceAdmin.v1` on the default compute SA (one-time setup):
+  ```bash
+  PROJECT_NUMBER=$(gcloud projects describe $(gcloud config get-value project) --format="value(projectNumber)")
+  gcloud projects add-iam-policy-binding $(gcloud config get-value project) \
+    --member="serviceAccount:${PROJECT_NUMBER}-compute@developer.gserviceaccount.com" \
+    --role="roles/compute.instanceAdmin.v1" --condition=None
+  ```
+- Launch jobs:
+  ```bash
+  python scripts/launch_gcp_job.py hello-world
+  python scripts/launch_gcp_job.py ppo-training --gcs-bucket my-bucket
+  ```
+
+### GCP project
+- Project: `legoassembly`
+- Account: `glen.berseth@unsupervisedrobotics.ai`
+- Default zone: `us-central1-a`
 
 ---
 

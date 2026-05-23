@@ -1,0 +1,14 @@
+runs/
+.venv/
+.git/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.pytest_cache/
+dist/
+build/
+*.log
+/tmp/
+.vscode/
+.idea/
