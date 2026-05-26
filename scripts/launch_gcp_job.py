@@ -80,6 +80,7 @@ def make_startup_script(
     wandb_key: str | None = None,
     install_docker: bool = True,
     runs_dir: str = "/var/runs",
+    capture_video: bool = False,
 ) -> str:
     sync_block = ""
     if gcs_bucket:
@@ -87,10 +88,13 @@ def make_startup_script(
 
     wandb_env = f"-e WANDB_API_KEY={wandb_key}" if wandb_key else ""
 
+    # xvfb-run provides a virtual display required by sapien_cpu renderer
+    xvfb_prefix = "xvfb-run -a " if capture_video else ""
+
     run_cmd = (
         f"docker run --rm -w /app -v {runs_dir}:/app/runs "
         f"{wandb_env} "
-        f"{docker_image} {docker_cmd}"
+        f"{docker_image} {xvfb_prefix}{docker_cmd}"
     )
 
     docker_install_block = textwrap.dedent("""\
@@ -164,6 +168,7 @@ def launch(
     spot: bool = True,
     use_cos: bool = True,
     dry_run: bool = False,
+    capture_video: bool = False,
 ) -> None:
     job = JOBS[job_name]
 
@@ -174,13 +179,21 @@ def launch(
         else:
             print("WARNING: wandb key not found — pass --wandb-key or run `wandb login` first.")
 
+    # Strip --no-capture-video if video is requested, otherwise ensure it's present
+    docker_cmd = job["cmd"]
+    if capture_video:
+        docker_cmd = docker_cmd.replace(" --no-capture-video", "")
+    elif "--no-capture-video" not in docker_cmd:
+        docker_cmd += " --no-capture-video"
+
     startup_script = make_startup_script(
         docker_image=job["image"],
-        docker_cmd=job["cmd"],
+        docker_cmd=docker_cmd,
         gcs_bucket=gcs_bucket,
         wandb_key=wandb_key if job.get("use_wandb") else None,
         install_docker=not use_cos,
         runs_dir="/var/runs",
+        capture_video=capture_video,
     )
 
     # Write startup script to a temp file to avoid gcloud metadata parsing issues
@@ -243,6 +256,8 @@ def main() -> None:
                         help="Use Debian instead of Container-Optimized OS (installs Docker at boot)")
     parser.add_argument("--dry-run", action="store_true",
                         help="Print the gcloud command without launching")
+    parser.add_argument("--capture-video", action="store_true",
+                        help="Record eval videos via xvfb + sapien_cpu renderer (rebuilds without --no-capture-video)")
     args = parser.parse_args()
 
     instance_name = args.instance_name or f"{args.job}-instance"
@@ -255,6 +270,7 @@ def main() -> None:
         spot=not args.no_spot,
         use_cos=not args.no_cos,
         dry_run=args.dry_run,
+        capture_video=args.capture_video,
     )
 
 

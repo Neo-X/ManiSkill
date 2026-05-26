@@ -17,12 +17,23 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-ins
     libpng-dev  \
     libvulkan1 \
     rsync \
+    software-properties-common \
     tmux \
     unzip \
     vim \
     vulkan-utils \
     wget \
     xvfb \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install up-to-date Mesa (RADV for AMD, ANV for Intel) via kisak-mesa PPA
+RUN add-apt-repository ppa:kisak/kisak-mesa && \
+    apt-get update && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+    libegl1-mesa \
+    libgl1-mesa-dri \
+    libgles2-mesa \
+    mesa-vulkan-drivers \
     && rm -rf /var/lib/apt/lists/*
 
 # Install (mini) conda

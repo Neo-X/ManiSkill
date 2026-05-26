@@ -88,6 +88,7 @@ The robot must pick up and place fridge-magnet-style letter tiles on a white tab
 - [x] GCP spot instance hello-world test passing — self-deletes after job completes
 - [x] Rebuilt Docker image (May 25 2026) to include `WORKDIR /app` and bake in `examples/` — original image (May 23) was missing these, causing `/app` not found errors on GCP
 - [ ] Add Docker Hub credentials to GCP startup script (currently image must be public; should support private repos via `DOCKERHUB_TOKEN` passed alongside `WANDB_API_KEY`)
+- [ ] Fix GPU rendering in Docker for AMD (gfx1151 / Radeon 8060S): base image `nvidia/cudagl:11.3.1-devel-ubuntu20.04` is too old — `libvulkan_radeon.so` depends on `libLLVM.so.20.1` and `/opt/amdgpu/libdrm_amdgpu.so.1` which don't exist in Ubuntu 20.04. Options: (A) rebase to `ubuntu:22.04` (Mesa 22+ supports gfx1151, no CUDA needed since we use CPU physx); (B) run render tests outside Docker via `.venv` and keep Docker for GCP with `--no-capture-video`
 - [x] Spot instance confirmed working in northamerica-northeast1-a — 100k step ppo-test run logged to wandb
 - [ ] Full training run (10M steps) on GCP spot instance
 - [ ] Evaluate success rate after full training
