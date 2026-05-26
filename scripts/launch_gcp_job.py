@@ -45,12 +45,12 @@ JOBS = {
         cmd=(
             "python /app/examples/baselines/ppo/ppo.py"
             " --track --wandb-project-name ManiSkill --wandb-entity real-lab"
-            " --use-async-vector-env --num-envs 16 --no-capture-video"
-            " --num-eval-envs 2 --num-steps 50 --num-eval-steps 100"
+            " --use-async-vector-env --num-envs 32 --no-capture-video"
+            " --num-eval-envs 4 --num-steps 50 --num-eval-steps 100"
             " --total-timesteps 100000 --eval-freq 10"
             " --exp-name gcp-ppo-test"
         ),
-        machine_type="e2-standard-8",
+        machine_type="e2-standard-32",
         use_wandb=True,
     ),
     "ppo-training": dict(
@@ -63,7 +63,7 @@ JOBS = {
             " --total-timesteps 10000000 --eval-freq 125"
             " --exp-name push-text-state-ppo"
         ),
-        machine_type="e2-standard-8",
+        machine_type="e2-standard-32",
         use_wandb=True,
     ),
 }
