@@ -17,6 +17,8 @@ try:
 except ImportError:
     SummaryWriter = None
 
+import wandb
+
 # ManiSkill specific imports
 import mani_skill.envs
 from mani_skill.utils import gym_utils
@@ -309,7 +311,6 @@ if __name__ == "__main__":
     if not args.evaluate:
         print("Running training")
         if args.track:
-            import wandb
             config = vars(args)
             config["env_cfg"] = dict(**env_kwargs, num_envs=args.num_envs, env_id=args.env_id, reward_mode="normalized_dense", env_horizon=max_episode_steps, partial_reset=args.partial_reset)
             config["eval_env_cfg"] = dict(**env_kwargs, num_envs=args.num_eval_envs, env_id=args.env_id, reward_mode="normalized_dense", env_horizon=max_episode_steps, partial_reset=False)

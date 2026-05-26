@@ -86,6 +86,9 @@ The robot must pick up and place fridge-magnet-style letter tiles on a white tab
 - [x] Docker image built and pushed to `gberseth/maniskill-ppo:latest` (Docker Hub)
 - [x] Training confirmed working inside Docker container (headless, no GPU required)
 - [x] GCP spot instance hello-world test passing — self-deletes after job completes
+- [x] Rebuilt Docker image (May 25 2026) to include `WORKDIR /app` and bake in `examples/` — original image (May 23) was missing these, causing `/app` not found errors on GCP
+- [ ] Add Docker Hub credentials to GCP startup script (currently image must be public; should support private repos via `DOCKERHUB_TOKEN` passed alongside `WANDB_API_KEY`)
+- [x] Spot instance confirmed working in northamerica-northeast1-a — 100k step ppo-test run logged to wandb
 - [ ] Full training run (10M steps) on GCP spot instance
 - [ ] Evaluate success rate after full training
 - [ ] (Future) Randomise goal word per episode
@@ -101,16 +104,18 @@ The robot must pick up and place fridge-magnet-style letter tiles on a white tab
 - Based on `nvidia/cudagl:11.3.1-devel-ubuntu20.04` (supports GPU via `--gpus all`)
 - Works **CPU-only** (no GPU) via null-render stubs in `mani_skill/envs/sapien_env.py`
 - `render_backend="none"` set automatically when `--no-capture-video` to skip Vulkan init
-- Bind-mounts needed at runtime (local source overrides PyPI install):
+- `WORKDIR /app`, `examples/` baked in at `/app/examples/`, `mani_skill/` installed to site-packages
+- Standard run command (no extra mounts needed after May 25 rebuild):
   ```bash
-  docker run --rm -w /app \
+  docker run --rm \
     -v $(pwd)/runs:/app/runs \
-    -v $(pwd)/examples:/examples \
-    -v $(pwd)/mani_skill:/opt/conda/lib/python3.9/site-packages/mani_skill \
-    gberseth/maniskill-ppo:latest python /examples/baselines/ppo/ppo.py \
+    -e WANDB_API_KEY=<key> \
+    gberseth/maniskill-ppo:latest python /app/examples/baselines/ppo/ppo.py \
+    --track --wandb-project-name ManiSkill --wandb-entity real-lab \
     --use-async-vector-env --num-envs 32 --no-capture-video \
     --exp-name push-text-state-ppo
   ```
+- GCP interactive debug: launch `ppo-debug` (n1-standard-8, COS, northamerica-northeast1-a), SSH via IAP, run docker manually to see errors live
 
 ### GCP spot instance launcher: `scripts/launch_gcp_job.py`
 - Uses Debian 12 + installs Docker at startup

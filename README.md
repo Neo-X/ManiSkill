@@ -30,6 +30,74 @@ This project currently is in a **beta release**, so not all features have been a
 Users looking for the original ManiSkill2 can find the commit for that codebase at the [v0.5.3 tag](https://github.com/haosulab/ManiSkill/tree/v0.5.3)
 
 
+## PushText-v1 — Quick Start
+
+Train a PPO policy to spell words by pushing letter tiles.
+
+### Local training (CPU)
+
+```bash
+# Install dependencies
+uv sync
+
+# Short smoke-test (~2 min)
+.venv/bin/python examples/baselines/ppo/ppo.py \
+  --use-async-vector-env --num-envs 32 --no-capture-video \
+  --num-eval-envs 4 --num-steps 50 --num-eval-steps 200 \
+  --total-timesteps 50000 --eval-freq 10 \
+  --exp-name push-text-smoke
+
+# Full 1M-step run with wandb logging
+.venv/bin/python examples/baselines/ppo/ppo.py \
+  --track --wandb-project-name ManiSkill \
+  --use-async-vector-env --num-envs 32 --no-capture-video \
+  --num-eval-envs 4 --num-steps 50 --num-eval-steps 200 \
+  --total-timesteps 1000000 --eval-freq 25 \
+  --exp-name push-text-state-ppo-1m
+```
+
+Monitor training:
+```bash
+tensorboard --logdir runs/         # local TensorBoard
+# or follow the wandb URL printed at startup
+```
+
+### Docker (headless, no GPU required)
+
+```bash
+docker pull gberseth/maniskill-ppo:latest
+
+docker run --rm -w /app \
+  -v $(pwd)/runs:/app/runs \
+  -v $(pwd)/examples:/examples \
+  -v $(pwd)/mani_skill:/opt/conda/lib/python3.9/site-packages/mani_skill \
+  gberseth/maniskill-ppo:latest python /examples/baselines/ppo/ppo.py \
+  --use-async-vector-env --num-envs 32 --no-capture-video \
+  --exp-name push-text-docker
+```
+
+### GCP spot instance
+
+Requires `gcloud` authenticated with project `legoassembly` and the one-time IAM setup in `progress.md`.
+
+```bash
+# Dry-run to preview the launch command
+uv run scripts/launch_gcp_job.py ppo-training --dry-run
+
+# Launch (e2-standard-8 spot, ~$0.08/hr, self-deletes when done)
+uv run scripts/launch_gcp_job.py ppo-training
+```
+
+### Reward verification
+
+```bash
+.venv/bin/python scripts/check_reward.py
+# Renders overhead + wrist camera images with tiles at perfect positions
+# Expected: normalized_reward=1.0, raw_reward=16.0 (for "AT")
+```
+
+---
+
 ## Installation
 Installation of ManiSkill is extremely simple, you only need to run a few pip installs and setup Vulkan for rendering.
 
