@@ -307,27 +307,75 @@ class PushTextEnv(BaseEnv):
             n = len(self.letter_tiles)
             tcp = self.agent.tcp.pose.p  # (b, 3)
 
-            # Flatten letter dim so all tensors are (b, n*k) — compatible with flatten_state_dict
-            letter_poses = torch.stack(
-                [t.pose.raw_pose for t in self.letter_tiles], dim=1
-            ).reshape(b, n * 7)  # (b, n*7)
+            # Target quaternion: 90° CW around Z so letters read correctly in top-down view.
+            # All tiles share the same target orientation.
+            _c = float(np.sqrt(2) / 2)
+            q_target = torch.tensor(
+                [[_c, 0.0, 0.0, -_c]], device=self.device
+            ).expand(b, -1)  # (b, 4)  [w, x, y, z]
 
+            # q_target_inv = conjugate [w, -x, -y, -z] (valid for unit quaternions).
+            q_target_inv = q_target * torch.tensor(
+                [1.0, -1.0, -1.0, -1.0], device=self.device
+            )
+
+            def _quat_mul(q1, q2):
+                w1, x1, y1, z1 = q1.unbind(-1)
+                w2, x2, y2, z2 = q2.unbind(-1)
+                return torch.stack([
+                    w1*w2 - x1*x2 - y1*y2 - z1*z2,
+                    w1*x2 + x1*w2 + y1*z2 - z1*y2,
+                    w1*y2 - x1*z2 + y1*w2 + z1*x2,
+                    w1*z2 + x1*y2 - y1*x2 + z1*w2,
+                ], dim=-1)
+
+            def _quat_to_axis_angle(q):
+                """
+                Convert unit quaternion [w,x,y,z] to axis-angle vector (3,).
+                The axis defaults to world-Z (straight up from table) when the
+                rotation angle is near zero, so the representation is continuous
+                and centred on the correct axis for flat tiles.
+                """
+                w = q[..., 0:1].clamp(-1.0, 1.0)
+                xyz = q[..., 1:]
+                angle = 2.0 * torch.acos(w.abs())          # (b, 1), always ≥ 0
+                sin_half = torch.sqrt(1.0 - w**2).clamp(min=1e-6)
+                axis = xyz / sin_half                       # (b, 3), unit axis
+                # When angle≈0 the axis is numerically unstable; default to +Z
+                near_zero = (angle < 1e-6).expand_as(axis)
+                z_up = torch.zeros_like(axis)
+                z_up[..., 2] = 1.0
+                axis = torch.where(near_zero, z_up, axis)
+                # Flip so w≥0 (shortest-path convention keeps axis pointing up)
+                axis = axis * torch.sign(w)
+                return axis * angle                         # (b, 3)
+
+            # (b, n*3): rotation error as axis-angle for each tile, flattened.
+            # Zero vector means perfectly aligned with target; axis points along
+            # world-Z at the start of each episode when tiles lie flat.
+            letter_rot_to_target = torch.stack([
+                _quat_to_axis_angle(_quat_mul(q_target_inv, t.pose.q))
+                for t in self.letter_tiles
+            ], dim=1).reshape(b, n * 3)
+
+            # (b, n*3): 3-D vector from target position to tile position for each letter
             target_pos = torch.tensor(
                 [[tx, ty, TILE_HALF_SIZE[2]] for tx, ty in self.target_xys],
                 device=self.device,
             ).unsqueeze(0).expand(b, -1, -1)  # (b, n, 3)
 
+            # (b, n*3): 3-D vector from TCP to each tile
             tcp_to_letters = torch.stack(
                 [t.pose.p - tcp for t in self.letter_tiles], dim=1
-            ).reshape(b, n * 3)  # (b, n*3)
+            ).reshape(b, n * 3)
 
+            # (b, n*3): 3-D vector from each tile to its target position
             letters_to_targets = (
                 target_pos - torch.stack([t.pose.p for t in self.letter_tiles], dim=1)
-            ).reshape(b, n * 3)  # (b, n*3)
+            ).reshape(b, n * 3)
 
             obs.update(
-                letter_poses=letter_poses,
-                target_positions=target_pos.reshape(b, n * 3),
+                letter_rot_to_target=letter_rot_to_target,
                 tcp_to_letters=tcp_to_letters,
                 letters_to_targets=letters_to_targets,
             )
