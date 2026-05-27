@@ -10,19 +10,23 @@ The robot must pick up and place fridge-magnet-style letter tiles on a white tab
 
 ## Task Design
 
-**Object geometry:** Real letter-shaped OBJ meshes (40mm tall, 12mm thick), extracted from `assets/objects/Alphabet.stl` and `assets/objects/numbers.stl`. Ghost (semi-transparent) target markers show target positions.
+**Object geometry:** Real letter-shaped OBJ meshes (40mm tall, 12mm thick, 2× scale for visibility), extracted from `assets/objects/Alphabet.stl` and `assets/objects/numbers.stl`. Ghost (semi-transparent) target markers show target positions and orientation.
 
 **Robot:** `panda_wristcam` (full gripper — can pick, place, and push).
 
 **Goal specification:** A text string (e.g. `"AT"`, `"CAT"`) passed at env construction. Exposed via `get_language_instruction()` for VLA consumption.
 
-**Target layout:** Letters arranged left-to-right in a centered row on the table, spaced 0.065 m apart.
+**Target layout:** Letters arranged left-to-right in a centered row on the table, spaced 0.130 m apart (doubled with 2× scale). Target orientation is 90° CW around Z so letters read correctly in the top-down camera view.
 
 **Randomization:** Each letter tile spawns at a random (x, y, z-rotation) each episode, with non-overlapping placement via `UniformPlacementSampler`.
 
 **Success:** Every letter within 0.025 m of its target, stationary, and released by gripper.
 
-**Reward:** Staged per-letter reward (reach → grasp → place → release), summed across letters. Mirrors StackCube-v1 structure. Max raw = n_letters × 8, normalized to [0, 1].
+**Reward:** Staged per-letter reward (reach → grasp → place → release), summed across letters. Mirrors StackCube-v1 structure. Max raw = n_letters × 8 + 2 (OCR bonus), normalized to [0, 1].
+
+**Top-down camera (`base_camera`):** 256×256, eye=[-0.1, 0, 1.1], up=(1,0,0). Robot arm is hidden before rendering via `get_table_view()` — used for the OCR reward bonus and debugging. OCR (EasyOCR, 2× upscale) detects the goal word every 20 steps and adds a +2 reward bonus.
+
+**State observation (43-dim):** `qpos(9) + qvel(9) + tcp_pose(7) + letter_rot_to_target(n×3) + tcp_to_letters(n×3) + letters_to_targets(n×3)`. Rotation error is expressed as axis-angle (axis defaults to world-Z at zero error).
 
 ---
 
@@ -91,15 +95,16 @@ The robot must pick up and place fridge-magnet-style letter tiles on a white tab
 - [ ] Fix GPU rendering in Docker for AMD (gfx1151 / Radeon 8060S): base image `nvidia/cudagl:11.3.1-devel-ubuntu20.04` is too old — `libvulkan_radeon.so` depends on `libLLVM.so.20.1` and `/opt/amdgpu/libdrm_amdgpu.so.1` which don't exist in Ubuntu 20.04. Options: (A) rebase to `ubuntu:22.04` (Mesa 22+ supports gfx1151, no CUDA needed since we use CPU physx); (B) run render tests outside Docker via `.venv` ✅ confirmed working
 - [ ] RLinf AMD image (`rlinf/rlinf:agentic-rlinf0.2-libero-rocm6.4`) also fails Vulkan init (gfx1151 + SAPIEN 3.0.1 `ErrorInitializationFailed`). Use `.venv` locally; RLinf image is suitable for NVIDIA GCP instances only
 - [x] Spot instance confirmed working in northamerica-northeast1-a — 100k step ppo-test run logged to wandb
+- [x] 1M step PPO run started locally (wandb: `real-lab/ManiSkill`, run `push-text-1M`, ~687 SPS on 32 envs)
 - [ ] Full training run (10M steps) on GCP spot instance
 - [ ] Evaluate success rate after full training
 
 ## PushText Environment — Planned Improvements
 
 ### Short-term
-- [ ] **1. Verify letter spawn randomization** — `UniformPlacementSampler` is in place; confirm positions and rotations are truly random each episode
-- [ ] **2. Bigger, more visible letters** — increase tile/mesh scale so letters are clearly readable in top-down camera images
-- [ ] **3. Image-based reward (AT detection)** — add a top-down camera; use a text detection model (e.g. PaddleOCR or EasyOCR) to check if the arranged tiles spell "AT"; use this as a reward signal
+- [x] **1. Verify letter spawn randomization** — confirmed: tile positions differ across episodes (tested 3 episodes)
+- [x] **2. Bigger, more visible letters** — 2× scale (`LETTER_SCALE=[2,2,2]`), `TILE_HALF_SIZE` and `TILE_SPACING` doubled
+- [x] **3. Image-based reward (OCR)** — top-down `base_camera` (robot hidden via `get_table_view()`); EasyOCR at 2× upscale detects goal word every 20 steps; +2 reward bonus; videos in `runs/push-text/`
 - [ ] **4. Randomize goal letter** — sample goal word randomly each episode instead of hardcoding "AT"
 
 ### Medium-term
@@ -160,5 +165,7 @@ The robot must pick up and place fridge-magnet-style letter tiles on a white tab
 - **Based on StackCube-v1** — uses `panda_wristcam` (full gripper) so robot can pick, place, and push.
 - **Real letter geometry** — OBJ meshes from STL assets, loaded via `add_multiple_convex_collisions_from_file` + `add_visual_from_file`, following `AssemblingKits-v1` pattern.
 - **`PACKAGE_ASSET_DIR`** — uses ManiSkill's built-in asset path constant, not fragile relative path computation.
-- **Color = identity** — each letter maps to a fixed color from an 8-color palette.
+- **Color = identity** — each letter maps to a fixed color from an 8-color palette; partial emission added so colors are visible under overhead lighting.
 - **CPU PPO** — uses `--use-async-vector-env` for multiprocessing; eval loop fixed to convert numpy obs to tensors.
+- **State obs design** — `target_positions` removed (redundant; `letters_to_targets` encodes the same info). `letter_poses` replaced by `letter_rot_to_target` (axis-angle, 3D per letter, zero = aligned with target, axis defaults to world-Z). Total: 43-dim for "AT".
+- **Target orientation** — ghost markers and tiles use 90° CW Z-rotation (`q=[√2/2, 0, 0, -√2/2]`) so letters read correctly in the top-down camera view.
