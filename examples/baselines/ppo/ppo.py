@@ -214,11 +214,23 @@ if __name__ == "__main__":
 
     train_num_envs = args.num_envs if not args.evaluate else 1
 
-    def _make_cpu_env(seed: int, reconfiguration_freq: Optional[int], ignore_terminations: bool):
+    eval_output_dir = None
+    if args.capture_video:
+        eval_output_dir = f"runs/{run_name}/videos"
+        if args.evaluate:
+            assert args.checkpoint is not None
+            eval_output_dir = f"{os.path.dirname(args.checkpoint)}/test_videos"
+        print(f"Saving eval videos to {eval_output_dir}")
+
+    def _make_cpu_env(seed: int, reconfiguration_freq: Optional[int], ignore_terminations: bool,
+                      video_output_dir: Optional[str] = None):
         def _thunk():
             env = gym.make(args.env_id, reconfiguration_freq=reconfiguration_freq, **env_kwargs)
             if isinstance(env.action_space, gym.spaces.Dict):
                 env = FlattenActionSpaceWrapper(env)
+            if video_output_dir is not None:
+                env = RecordEpisode(env, output_dir=video_output_dir, save_trajectory=args.evaluate,
+                                    trajectory_name="trajectory", max_steps_per_video=args.num_eval_steps, video_fps=30)
             env = CPUGymWrapper(env, ignore_terminations=ignore_terminations, record_metrics=True)
             env.action_space.seed(seed)
             env.observation_space.seed(seed)
@@ -241,18 +253,16 @@ if __name__ == "__main__":
             _make_cpu_env(seed=args.seed + i, reconfiguration_freq=args.reconfiguration_freq, ignore_terminations=not args.partial_reset)
             for i in range(train_num_envs)
         ])
+        # Record video from first eval env only (RecordEpisode must wrap single envs, not VectorEnv)
         eval_envs = eval_vector_cls([
-            _make_cpu_env(seed=args.seed + 100000 + i, reconfiguration_freq=args.eval_reconfiguration_freq, ignore_terminations=not args.eval_partial_reset)
+            _make_cpu_env(seed=args.seed + 100000 + i, reconfiguration_freq=args.eval_reconfiguration_freq,
+                          ignore_terminations=not args.eval_partial_reset,
+                          video_output_dir=eval_output_dir if (args.capture_video and i == 0) else None)
             for i in range(args.num_eval_envs)
         ])
 
 
-    if args.capture_video:
-        eval_output_dir = f"runs/{run_name}/videos"
-        if args.evaluate:
-            assert args.checkpoint is not None
-            eval_output_dir = f"{os.path.dirname(args.checkpoint)}/test_videos"
-        print(f"Saving eval videos to {eval_output_dir}")
+    if args.capture_video and not args.use_async_vector_env:
         if args.save_train_video_freq is not None:
             save_video_trigger = lambda x : (x // args.num_steps) % args.save_train_video_freq == 0
             envs = RecordEpisode(envs, output_dir=f"runs/{run_name}/train_videos", save_trajectory=False, save_video_trigger=save_video_trigger, max_steps_per_video=args.num_steps, video_fps=30)

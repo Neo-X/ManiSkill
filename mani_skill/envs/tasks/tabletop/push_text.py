@@ -1,7 +1,8 @@
-from typing import Any, List, Union
+from typing import Any, List, Optional, Union
 
 import numpy as np
 import sapien.core as sapien
+import sapien.render
 import torch
 
 from mani_skill import PACKAGE_ASSET_DIR
@@ -29,12 +30,15 @@ _PALETTE = [
     [0.85, 0.40, 0.60, 1.0],  # pink
 ]
 
-# Fallback box half-size when no mesh exists for a letter (4cm × 3cm × 1.2cm)
-TILE_HALF_SIZE = [0.020, 0.015, 0.006]
+# Letter mesh scale (applied to OBJ meshes); 2× original for visibility
+LETTER_SCALE = [2.0, 2.0, 2.0]
+
+# Fallback box half-size when no mesh exists for a letter (8cm × 6cm × 2.4cm — 2× original)
+TILE_HALF_SIZE = [0.040, 0.030, 0.012]
 
 # Target row: letters laid out left-to-right, centered at this table position
 TARGET_CENTER = [-0.10, 0.00]
-TILE_SPACING = 0.065   # center-to-center (m)
+TILE_SPACING = 0.130   # center-to-center (m) — doubled with letter scale
 
 # Spawn region for letters at episode start
 SPAWN_BOUNDS = [[-0.05, -0.20], [0.15, 0.20]]
@@ -51,6 +55,8 @@ def _build_letter(scene, letter: str, name: str, color: List[float], kinematic: 
     """
     builder = scene.create_actor_builder()
     mat = sapien.render.RenderMaterial(base_color=color)
+    # Emission so palette color is visible under overhead lighting
+    mat.emission = [color[0], color[1], color[2], 1.0]
     key = letter.upper() if letter.isalpha() else letter
     mesh_path = LETTER_MESH_DIR / f"{key}.obj"
 
@@ -59,8 +65,8 @@ def _build_letter(scene, letter: str, name: str, color: List[float], kinematic: 
             phys = sapien.pysapien.physx.PhysxMaterial(
                 static_friction=1.5, dynamic_friction=1.5, restitution=0.0
             )
-            builder.add_convex_collision_from_file(str(mesh_path), material=phys)
-        builder.add_visual_from_file(str(mesh_path), material=mat)
+            builder.add_convex_collision_from_file(str(mesh_path), scale=LETTER_SCALE, material=phys)
+        builder.add_visual_from_file(str(mesh_path), scale=LETTER_SCALE, material=mat)
     else:
         # Fallback: plain box
         half_size = TILE_HALF_SIZE
@@ -114,18 +120,64 @@ class PushTextEnv(BaseEnv):
 
     @property
     def _default_sensor_configs(self):
-        # Near-overhead view centered on the table, letter area fills frame
-        pose = sapien_utils.look_at(eye=[0.0, 0, 0.5], target=[-0.1, 0, 0])
-        return [CameraConfig("base_camera", pose, 128, 128, np.pi / 2, 0.01, 100)]
+        # Straight down over letter area — robot arm stays out of frame.
+        # up=(1,0,0) gives the correct table orientation for letter reading.
+        pose = sapien_utils.look_at(eye=[-0.1, 0, 1.1], target=[-0.1, 0, 0], up=(1, 0, 0))
+        return [CameraConfig("base_camera", pose, 256, 256, np.pi / 3, 0.01, 100)]
 
     @property
     def _default_human_render_camera_configs(self):
-        # Overhead view so letters are clearly readable
-        pose = sapien_utils.look_at(eye=[0.0, 0, 0.6], target=[-0.1, 0, 0])
+        # Angled overhead view showing the full scene
+        pose = sapien_utils.look_at(eye=[0.3, 0.5, 0.8], target=[-0.1, 0, 0])
         return CameraConfig("render_camera", pose, 512, 512, 1.2, 0.01, 100)
 
     def _load_agent(self, options: dict):
         super()._load_agent(options, sapien.Pose(p=[-0.615, 0, 0]))
+
+    # ------------------------------------------------------------------
+    # Table-view camera (robot arm hidden)
+    # ------------------------------------------------------------------
+
+    def _collect_robot_render_bodies(self):
+        """Collect all RenderBodyComponents from robot links (cached)."""
+        if hasattr(self, "_robot_render_bodies"):
+            return self._robot_render_bodies
+        bodies = []
+        for link in self.agent.robot.links:
+            for phys_link in link._objs:
+                for comp in phys_link.entity.components:
+                    if isinstance(comp, sapien.render.RenderBodyComponent):
+                        bodies.append(comp)
+        self._robot_render_bodies = bodies
+        return bodies
+
+    def get_table_view(self) -> Optional[np.ndarray]:
+        """
+        Return a (H, W, 3) uint8 RGB image of the table from base_camera
+        with the robot arm hidden. Returns None if rendering is unavailable.
+        """
+        if not self.scene.can_render():
+            return None
+        cam_sensor = self._sensors.get("base_camera")
+        if cam_sensor is None:
+            return None
+        try:
+            bodies = self._collect_robot_render_bodies()
+            for body in bodies:
+                body.visibility = 0
+            self.scene.update_render(update_sensors=True, update_human_render_cameras=False)
+            cam_sensor.capture()
+            obs = cam_sensor.get_obs(rgb=True, depth=False, position=False, segmentation=False)
+            rgb = obs["rgb"]  # (H, W, 3) or (B, H, W, 3) torch uint8
+            if rgb.ndim == 4:
+                rgb = rgb[0]
+            img = rgb.cpu().numpy()
+        except Exception:
+            img = None
+        finally:
+            for body in bodies:
+                body.visibility = 1
+        return img
 
     # ------------------------------------------------------------------
     # Scene
@@ -152,29 +204,36 @@ class PushTextEnv(BaseEnv):
         self.letter_tiles = []
         self.target_markers = []
         # assign colors by letter character so same letter always same color
-        char_color = {}
+        self._char_color = {}
         color_idx = 0
         for ch in self.goal_text:
-            if ch not in char_color:
-                char_color[ch] = _PALETTE[color_idx % len(_PALETTE)]
+            if ch not in self._char_color:
+                self._char_color[ch] = _PALETTE[color_idx % len(_PALETTE)]
                 color_idx += 1
 
         for i, ch in enumerate(self.goal_text):
-            color = char_color[ch]
+            color = self._char_color[ch]
             ghost = [color[0], color[1], color[2], 0.30]
-            self.letter_tiles.append(_build_letter(self.scene, ch, f"tile_{i}_{ch}", color))
-            self.target_markers.append(
-                _build_letter(self.scene, ch, f"target_{i}_{ch}", ghost, kinematic=True)
-            )
+            tile = _build_letter(self.scene, ch, f"tile_{i}_{ch}", color)
+            marker = _build_letter(self.scene, ch, f"target_{i}_{ch}", ghost, kinematic=True)
+            self.letter_tiles.append(tile)
+            self.target_markers.append(marker)
 
     # ------------------------------------------------------------------
     # Episode init
     # ------------------------------------------------------------------
 
     def _initialize_episode(self, env_idx: torch.Tensor, options: dict):
+        self._ocr_bonus = torch.zeros(self.num_envs, device=self.device)
+        self._ocr_step_counter = 0
         with torch.device(self.device):
             b = len(env_idx)
             self.table_scene.initialize(env_idx)
+
+            # 90° clockwise rotation around Z (looking down) so letters read correctly
+            # quat = [cos(-45°), 0, 0, sin(-45°)] = [√2/2, 0, 0, -√2/2]
+            _c = float(np.sqrt(2) / 2)
+            target_q = torch.tensor([[_c, 0.0, 0.0, -_c]], device=self.device).expand(b, -1)
 
             # Place ghost markers at fixed target positions
             for marker, (tx, ty) in zip(self.target_markers, self.target_xys):
@@ -182,7 +241,7 @@ class PushTextEnv(BaseEnv):
                 xyz[:, 0] = tx
                 xyz[:, 1] = ty
                 xyz[:, 2] = TILE_HALF_SIZE[2] + 1e-3
-                marker.set_pose(Pose.create_from_pq(p=xyz))
+                marker.set_pose(Pose.create_from_pq(p=xyz, q=target_q))
 
             # Spawn letter tiles at random non-overlapping positions
             sampler = randomization.UniformPlacementSampler(
@@ -278,6 +337,39 @@ class PushTextEnv(BaseEnv):
         return [f"Arrange the letters to spell {self.goal_text}"] * self.num_envs
 
     # ------------------------------------------------------------------
+    # OCR-based bonus (checked every OCR_CHECK_INTERVAL steps)
+    # ------------------------------------------------------------------
+
+    OCR_CHECK_INTERVAL = 20  # steps between OCR checks
+
+    def _check_ocr_bonus(self) -> torch.Tensor:
+        """
+        Returns a (num_envs,) tensor with 1.0 if OCR detects all goal letters
+        in the table view image. Only works for single-env CPU sim.
+        """
+        bonus = torch.zeros(self.num_envs, device=self.device)
+        if self.num_envs != 1:
+            return bonus
+        img = self.get_table_view()
+        if img is None:
+            return bonus
+        try:
+            import cv2 as _cv2
+            import easyocr
+            if not hasattr(self, "_ocr_reader"):
+                self._ocr_reader = easyocr.Reader(["en"], gpu=False, verbose=False)
+            # Upscale 2x — OCR works better on larger images
+            H, W = img.shape[:2]
+            big = _cv2.resize(img, (W * 2, H * 2), interpolation=_cv2.INTER_LANCZOS4)
+            results = self._ocr_reader.readtext(big, detail=0, paragraph=False)
+            detected = "".join(results).upper().replace(" ", "")
+            if self.goal_text in detected:
+                bonus[0] = 1.0
+        except Exception:
+            pass
+        return bonus
+
+    # ------------------------------------------------------------------
     # Reward
     # ------------------------------------------------------------------
 
@@ -332,9 +424,15 @@ class PushTextEnv(BaseEnv):
             reward += letter_rew
 
         reward[info["success"]] = float(n * 8)
+
+        # OCR bonus: +2 when camera detects the goal word (checked every N steps)
+        self._ocr_step_counter += 1
+        if self._ocr_step_counter % self.OCR_CHECK_INTERVAL == 0:
+            self._ocr_bonus = self._check_ocr_bonus() * 2.0
+        reward = reward + self._ocr_bonus
+
         return reward
 
     def compute_normalized_dense_reward(self, obs: Any, action: torch.Tensor, info: dict):
-        return self.compute_dense_reward(obs=obs, action=action, info=info) / (
-            len(self.letter_tiles) * 8.0
-        )
+        max_reward = len(self.letter_tiles) * 8.0 + 2.0  # +2 for OCR bonus
+        return self.compute_dense_reward(obs=obs, action=action, info=info) / max_reward

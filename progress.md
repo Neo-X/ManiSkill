@@ -88,11 +88,25 @@ The robot must pick up and place fridge-magnet-style letter tiles on a white tab
 - [x] GCP spot instance hello-world test passing — self-deletes after job completes
 - [x] Rebuilt Docker image (May 25 2026) to include `WORKDIR /app` and bake in `examples/` — original image (May 23) was missing these, causing `/app` not found errors on GCP
 - [ ] Add Docker Hub credentials to GCP startup script (currently image must be public; should support private repos via `DOCKERHUB_TOKEN` passed alongside `WANDB_API_KEY`)
-- [ ] Fix GPU rendering in Docker for AMD (gfx1151 / Radeon 8060S): base image `nvidia/cudagl:11.3.1-devel-ubuntu20.04` is too old — `libvulkan_radeon.so` depends on `libLLVM.so.20.1` and `/opt/amdgpu/libdrm_amdgpu.so.1` which don't exist in Ubuntu 20.04. Options: (A) rebase to `ubuntu:22.04` (Mesa 22+ supports gfx1151, no CUDA needed since we use CPU physx); (B) run render tests outside Docker via `.venv` and keep Docker for GCP with `--no-capture-video`
+- [ ] Fix GPU rendering in Docker for AMD (gfx1151 / Radeon 8060S): base image `nvidia/cudagl:11.3.1-devel-ubuntu20.04` is too old — `libvulkan_radeon.so` depends on `libLLVM.so.20.1` and `/opt/amdgpu/libdrm_amdgpu.so.1` which don't exist in Ubuntu 20.04. Options: (A) rebase to `ubuntu:22.04` (Mesa 22+ supports gfx1151, no CUDA needed since we use CPU physx); (B) run render tests outside Docker via `.venv` ✅ confirmed working
+- [ ] RLinf AMD image (`rlinf/rlinf:agentic-rlinf0.2-libero-rocm6.4`) also fails Vulkan init (gfx1151 + SAPIEN 3.0.1 `ErrorInitializationFailed`). Use `.venv` locally; RLinf image is suitable for NVIDIA GCP instances only
 - [x] Spot instance confirmed working in northamerica-northeast1-a — 100k step ppo-test run logged to wandb
 - [ ] Full training run (10M steps) on GCP spot instance
 - [ ] Evaluate success rate after full training
-- [ ] (Future) Randomise goal word per episode
+
+## PushText Environment — Planned Improvements
+
+### Short-term
+- [ ] **1. Verify letter spawn randomization** — `UniformPlacementSampler` is in place; confirm positions and rotations are truly random each episode
+- [ ] **2. Bigger, more visible letters** — increase tile/mesh scale so letters are clearly readable in top-down camera images
+- [ ] **3. Image-based reward (AT detection)** — add a top-down camera; use a text detection model (e.g. PaddleOCR or EasyOCR) to check if the arranged tiles spell "AT"; use this as a reward signal
+- [ ] **4. Randomize goal letter** — sample goal word randomly each episode instead of hardcoding "AT"
+
+### Medium-term
+- [ ] **5. Dictionary word sampling** — start with 2–3 letter words from a filtered word list; use the text detection model from (3) to verify the formed word matches the goal; curriculum: increase word length as success rate improves
+- [ ] **6. HRL / policy switching** — add a high-level controller that selects which letter to manipulate next; low-level policies handle individual pick-place; enables longer-horizon planning for multi-letter words
+
+### Long-term
 - [ ] (Future) Bi-manual variant: two panda_wristcam arms
 
 ---

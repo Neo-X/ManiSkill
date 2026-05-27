@@ -42,26 +42,6 @@ from mani_skill.utils.structs.types import Array, SimConfig
 from mani_skill.utils.visualization.misc import tile_images
 
 
-def _install_null_render_stubs():
-    """Replace sapien render classes with no-ops so physics-only envs work without Vulkan."""
-    import sapien.pysapien.render as _pr
-    import sapien.render as _r
-    import sapien.wrapper.urdf_loader as _ul
-
-    class _NullMaterial:
-        def __init__(self, **kwargs): pass
-        def __setattr__(self, k, v): object.__setattr__(self, k, v)
-        def __getattr__(self, k): return None
-
-    class _NullTexture:
-        def __init__(self, *args, **kwargs): pass
-
-    for mod in (_pr, _r, _ul):
-        mod.RenderMaterial = _NullMaterial
-        if hasattr(mod, 'RenderTexture2D'):
-            mod.RenderTexture2D = _NullTexture
-
-
 class BaseEnv(gym.Env):
     """Superclass for ManiSkill environments.
 
@@ -260,8 +240,6 @@ class BaseEnv(gym.Env):
         self.device = self.backend.device
         self._sim_device = self.backend.sim_device
         self._render_device = self.backend.render_device
-        if self._render_device is None:
-            _install_null_render_stubs()
         if self.device.type == "cuda":
             if not physx.is_gpu_enabled():
                 physx.enable_gpu()
@@ -836,11 +814,7 @@ class BaseEnv(gym.Env):
 
         for uid, sensor_config in self._sensor_configs.items():
             if uid in self._agent_sensor_configs:
-                if isinstance(self.agent, MultiAgent):
-                    agent_idx = self.agent._sensor_config_agent_map[uid]
-                    articulation = self.agent.agents[agent_idx].robot 
-                else:
-                    articulation = self.agent.robot
+                articulation = self.agent.robot
             else:
                 articulation = None
             if isinstance(sensor_config, StereoDepthCameraConfig):
