@@ -107,6 +107,10 @@ class Args:
     """evaluation frequency in terms of iterations"""
     save_train_video_freq: Optional[int] = None
     """frequency to save training videos in terms of iterations"""
+    wandb_video_freq: int = 200_000
+    """log an eval video to wandb every this many environment steps (0 = never)"""
+    checkpoint_freq: int = 200_000
+    """save a model checkpoint every this many environment steps (0 = only save final)"""
     finite_horizon_gae: bool = False
     use_async_vector_env: bool = False
     """if toggled, use gym.vector.AsyncVectorEnv/SyncVectorEnv over ManiSkill internal vectorization"""
@@ -201,12 +205,16 @@ if __name__ == "__main__":
 
     device = torch.device("cuda" if torch.cuda.is_available() and args.cuda else "cpu")
 
-    # env setup — skip renderer when not capturing video (required for headless/Docker)
-    render_mode = "rgb_array" if args.capture_video else None
-    render_backend = "gpu" if args.capture_video else "none"
+    # env setup — training/eval envs never render; video capture uses a separate on-demand env
+    # During --evaluate mode, rendering is always enabled for trajectory saving
+    render_mode = "rgb_array" if (args.capture_video and args.evaluate) else None
+    render_backend = "gpu" if (args.capture_video and args.evaluate) else "none"
     env_kwargs: dict[str, object] = dict(obs_mode="state", render_mode=render_mode, render_backend=render_backend, sim_backend="physx_cpu")
+    # Separate kwargs for on-demand video capture (always GPU-rendered)
+    video_env_kwargs: dict[str, object] = dict(obs_mode="state", render_mode="rgb_array", render_backend="gpu", sim_backend="physx_cpu")
     if args.control_mode is not None:
         env_kwargs["control_mode"] = args.control_mode
+        video_env_kwargs["control_mode"] = args.control_mode
 
     probe_env = gym.make(args.env_id, **env_kwargs)
     max_episode_steps = gym_utils.find_max_episode_steps_value(probe_env)
@@ -253,11 +261,10 @@ if __name__ == "__main__":
             _make_cpu_env(seed=args.seed + i, reconfiguration_freq=args.reconfiguration_freq, ignore_terminations=not args.partial_reset)
             for i in range(train_num_envs)
         ])
-        # Record video from first eval env only (RecordEpisode must wrap single envs, not VectorEnv)
         eval_envs = eval_vector_cls([
             _make_cpu_env(seed=args.seed + 100000 + i, reconfiguration_freq=args.eval_reconfiguration_freq,
                           ignore_terminations=not args.eval_partial_reset,
-                          video_output_dir=eval_output_dir if (args.capture_video and i == 0) else None)
+                          video_output_dir=eval_output_dir if (args.evaluate and args.capture_video and i == 0) else None)
             for i in range(args.num_eval_envs)
         ])
 
@@ -266,11 +273,41 @@ if __name__ == "__main__":
         if args.save_train_video_freq is not None:
             save_video_trigger = lambda x : (x // args.num_steps) % args.save_train_video_freq == 0
             envs = RecordEpisode(envs, output_dir=f"runs/{run_name}/train_videos", save_trajectory=False, save_video_trigger=save_video_trigger, max_steps_per_video=args.num_steps, video_fps=30)
-        eval_envs = RecordEpisode(eval_envs, output_dir=eval_output_dir, save_trajectory=args.evaluate, trajectory_name="trajectory", max_steps_per_video=args.num_eval_steps, video_fps=30)
+        if args.evaluate:
+            eval_envs = RecordEpisode(eval_envs, output_dir=eval_output_dir, save_trajectory=True, trajectory_name="trajectory", max_steps_per_video=args.num_eval_steps, video_fps=30)
     if not args.use_async_vector_env:
         envs = ManiSkillVectorEnv(envs, args.num_envs, ignore_terminations=not args.partial_reset, record_metrics=True)
         eval_envs = ManiSkillVectorEnv(eval_envs, args.num_eval_envs, ignore_terminations=not args.eval_partial_reset, record_metrics=True)
     assert isinstance(envs.single_action_space, gym.spaces.Box), "only continuous action space is supported"
+
+    def record_video_episode() -> Optional[str]:
+        """Create a temporary single GPU env, run one episode with RecordEpisode, return the saved video path."""
+        if eval_output_dir is None:
+            return None
+        os.makedirs(eval_output_dir, exist_ok=True)
+        try:
+            vid_env = gym.make(args.env_id, num_envs=1, **video_env_kwargs)
+            if isinstance(vid_env.action_space, gym.spaces.Dict):
+                vid_env = FlattenActionSpaceWrapper(vid_env)
+            vid_env = RecordEpisode(vid_env, output_dir=eval_output_dir, save_trajectory=False,
+                                    max_steps_per_video=args.num_eval_steps, video_fps=30)
+            vid_env = ManiSkillVectorEnv(vid_env, 1, ignore_terminations=True, record_metrics=False)
+            obs_v, _ = vid_env.reset(seed=args.seed + 999999)
+            obs_v = to_tensor(obs_v)
+            agent.eval()
+            for _ in range(args.num_eval_steps):
+                with torch.no_grad():
+                    obs_v, _, _, _, _ = vid_env.step(agent.get_action(obs_v, deterministic=True))
+                    obs_v = to_tensor(obs_v)
+            vid_env.close()
+        except Exception as e:
+            print(f"Warning: video capture failed: {e}")
+            return None
+        videos = sorted(
+            [f for f in os.listdir(eval_output_dir) if f.endswith(".mp4")],
+            key=lambda f: os.path.getmtime(os.path.join(eval_output_dir, f)),
+        )
+        return os.path.join(eval_output_dir, videos[-1]) if videos else None
 
     def to_tensor(x):
         if isinstance(x, torch.Tensor):
@@ -330,6 +367,7 @@ if __name__ == "__main__":
                 sync_tensorboard=False,
                 config=config,
                 name=run_name,
+                monitor_gym=True,
                 save_code=True,
                 group="PPO",
                 tags=["ppo", "walltime_efficient"]
@@ -376,6 +414,9 @@ if __name__ == "__main__":
     if args.checkpoint:
         agent.load_state_dict(torch.load(args.checkpoint))
 
+    last_video_log_step = -args.wandb_video_freq  # ensure first video logs at step 0+freq
+    last_ckpt_step = -args.checkpoint_freq  # ensure first checkpoint saves at step 0+freq
+
     for iteration in range(1, args.num_iterations + 1):
         print(f"Epoch: {iteration}, global_step={global_step}")
         final_values = torch.zeros((args.num_steps, args.num_envs), device=device)
@@ -414,13 +455,26 @@ if __name__ == "__main__":
                 if logger is not None:
                     logger.add_scalar(f"eval/{k}", mean, global_step)
                 print(f"eval_{k}_mean={mean}")
+
+            # Capture and upload a video to wandb every wandb_video_freq steps
+            if (args.track and args.capture_video
+                    and args.wandb_video_freq > 0
+                    and global_step - last_video_log_step >= args.wandb_video_freq):
+                print(f"Capturing eval video at step {global_step}")
+                video_path = record_video_episode()
+                if video_path:
+                    wandb.log({"eval/video": wandb.Video(video_path, fps=30, format="mp4")}, step=global_step)
+                last_video_log_step = global_step
+
             if args.evaluate:
                 break
-        if args.save_model and iteration % args.eval_freq == 1:
-            model_path = f"runs/{run_name}/ckpt_{iteration}.pt"
+        if (args.save_model and args.checkpoint_freq > 0
+                and global_step - last_ckpt_step >= args.checkpoint_freq):
+            model_path = f"runs/{run_name}/ckpt_{global_step}.pt"
             os.makedirs(f"runs/{run_name}", exist_ok=True)
             torch.save(agent.state_dict(), model_path)
             print(f"model saved to {model_path}")
+            last_ckpt_step = global_step
         # Annealing the rate if instructed to do so.
         if args.anneal_lr:
             frac = 1.0 - (iteration - 1.0) / args.num_iterations
