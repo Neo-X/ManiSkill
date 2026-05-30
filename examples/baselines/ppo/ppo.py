@@ -19,6 +19,9 @@ except ImportError:
 
 import wandb
 
+
+import buffer_gap
+
 # ManiSkill specific imports
 import mani_skill.envs
 from mani_skill.utils import gym_utils
@@ -114,6 +117,12 @@ class Args:
     finite_horizon_gae: bool = False
     use_async_vector_env: bool = False
     """if toggled, use gym.vector.AsyncVectorEnv/SyncVectorEnv over ManiSkill internal vectorization"""
+    return_buffer_size: int = 10_000
+    """size of the episode-return buffer for sub-optimality gap tracking"""
+    top_return_buff_percentage: float = 0.05
+    """top-k% of returns to use as the experience-optimal estimate"""
+    plot_freq: int = 5
+    """log gap metrics every this many PPO iterations"""
 
 
     # to be filled in runtime
@@ -280,7 +289,7 @@ if __name__ == "__main__":
         eval_envs = ManiSkillVectorEnv(eval_envs, args.num_eval_envs, ignore_terminations=not args.eval_partial_reset, record_metrics=True)
     assert isinstance(envs.single_action_space, gym.spaces.Box), "only continuous action space is supported"
 
-    def record_video_episode() -> Optional[str]:
+    def record_video_episode(step: int = 0) -> Optional[str]:
         """Create a temporary single GPU env, run one episode with RecordEpisode, return the saved video path."""
         if eval_output_dir is None:
             return None
@@ -292,7 +301,7 @@ if __name__ == "__main__":
             vid_env = RecordEpisode(vid_env, output_dir=eval_output_dir, save_trajectory=False,
                                     max_steps_per_video=args.num_eval_steps, video_fps=30)
             vid_env = ManiSkillVectorEnv(vid_env, 1, ignore_terminations=True, record_metrics=False)
-            obs_v, _ = vid_env.reset(seed=args.seed + 999999)
+            obs_v, _ = vid_env.reset(seed=args.seed + step)
             obs_v = to_tensor(obs_v)
             agent.eval()
             for _ in range(args.num_eval_steps):
@@ -387,6 +396,13 @@ if __name__ == "__main__":
     agent = Agent(envs).to(device)
     optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
 
+    gap_stats = buffer_gap.BufferGapV2(
+        args.return_buffer_size, args.top_return_buff_percentage,
+        policy=agent, device=device, args=args, envs=None,
+    )
+    gap_stats._last_eval = float("inf")  # skip env-based eval (ManiSkill env incompatible with cleanrl interface)
+    _ep_return_buf = torch.zeros(args.num_envs, device=device)
+
     # ALGO Logic: Storage setup
     obs = torch.zeros((args.num_steps, args.num_envs) + envs.single_observation_space.shape).to(device)
     actions = torch.zeros((args.num_steps, args.num_envs) + envs.single_action_space.shape).to(device)
@@ -461,7 +477,7 @@ if __name__ == "__main__":
                     and args.wandb_video_freq > 0
                     and global_step - last_video_log_step >= args.wandb_video_freq):
                 print(f"Capturing eval video at step {global_step}")
-                video_path = record_video_episode()
+                video_path = record_video_episode(step=global_step)
                 if video_path:
                     wandb.log({"eval/video": wandb.Video(video_path, fps=30, format="mp4")}, step=global_step)
                 last_video_log_step = global_step
@@ -502,6 +518,14 @@ if __name__ == "__main__":
             truncations = to_tensor(truncations)
             next_done = torch.logical_or(terminations, truncations).to(torch.float32)
             rewards[step] = reward.view(-1) * args.reward_scale
+
+            # Accumulate unscaled episode returns for gap metrics
+            _ep_return_buf += reward.view(-1)
+            done_mask = next_done.bool()
+            if done_mask.any():
+                for ret in _ep_return_buf[done_mask].cpu().tolist():
+                    gap_stats.add({"r": ret, "actions": [], "rewards": []})
+                _ep_return_buf[done_mask] = 0.0
 
             if "final_info" in infos:
                 done_mask = to_tensor(infos["_final_info"]).to(torch.bool)
@@ -642,6 +666,9 @@ if __name__ == "__main__":
         logger.add_scalar("time/update_time", update_time, global_step)
         logger.add_scalar("time/rollout_time", rollout_time, global_step)
         logger.add_scalar("time/rollout_fps", args.num_envs * args.num_steps / rollout_time, global_step)
+        logger.add_scalar("train/mean_reward", rewards.float().mean().item(), global_step)
+        if iteration % args.plot_freq == 0 and gap_stats._returns:
+            gap_stats.plot_gap(logger, global_step)
     if not args.evaluate:
         if args.save_model:
             model_path = f"runs/{run_name}/final_ckpt.pt"

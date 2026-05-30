@@ -447,6 +447,21 @@ class PushTextEnv(BaseEnv):
             # Stage 0: reach
             letter_rew = 2 * (1 - torch.tanh(5 * tcp_to_tile))
 
+            # Pre-grasp bridge: reward closing the gripper when TCP is near the tile.
+            # Creates a gradient from "hover near tile" → "close gripper" → trigger is_grasping.
+            # Active only when not yet grasped/placed; fades to zero beyond 10 cm.
+            gripper_close_frac = 1.0 - (
+                self.agent.robot.get_qpos()[:, -2:].sum(dim=1) / gripper_width
+            )  # 0 = fully open, 1 = fully closed
+            proximity = 1.0 - torch.clamp(tcp_to_tile / 0.10, 0.0, 1.0)
+            pre_grasp_rew = proximity * gripper_close_frac  # (b,), max = 1.0
+            pre_grasp_rew = torch.where(
+                is_grasped[:, i] | is_placed[:, i],
+                torch.zeros_like(pre_grasp_rew),
+                pre_grasp_rew,
+            )
+            letter_rew = letter_rew + pre_grasp_rew
+
             # Stage 1: grasped — reward for moving tile toward target
             place_rew = 1 - torch.tanh(5.0 * dists[:, i])
             letter_rew = torch.where(is_grasped[:, i], 4 + place_rew, letter_rew)

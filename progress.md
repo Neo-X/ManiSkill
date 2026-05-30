@@ -99,6 +99,20 @@ The robot must pick up and place fridge-magnet-style letter tiles on a white tab
 - [ ] Full training run (10M steps) on GCP spot instance
 - [ ] Evaluate success rate after full training
 
+## Training Experiments
+
+### Experiment 1 — Baseline PPO (2026-05-27)
+- **Run:** `push-text-state-ppo` · wandb: `real-lab/ManiSkill/runs/zbb798ez`
+- **Config:** 32 envs, async CPU, 10M steps (killed early), ~1100 SPS
+- **Result:** `eval_success_rate=0.0000` throughout
+- **Notes:** Video capture was rendering every step (major slowdown). Fixed: rendering now on-demand only, triggered every 200k steps via a temporary single GPU env (`record_video_episode()`). Checkpoints every 200k steps.
+
+### Experiment 2 — Pre-grasp bridging reward (2026-05-29)
+- **Run:** `push-text-pregrasp-reward` · wandb: `real-lab/ManiSkill/runs/qawp9umu`
+- **Config:** 32 envs, async CPU, 1M steps, ~1030 SPS
+- **Result:** `eval_success_rate=0.0000`, `eval_mean_reward≈0.135`
+- **Notes:** Added a bridging reward term: `proximity(tcp→tile) × gripper_close_frac` to encourage closing the gripper when near a tile (filling the reward gap between reach=2 and grasped=4). No improvement. Conclusion: reward shaping alone does not solve the exploration problem — the policy cannot discover structured grasping behaviour through random Gaussian noise on a 9-DoF arm. **Better structured exploration is needed.**
+
 ## PushText Environment — Planned Improvements
 
 ### Short-term
