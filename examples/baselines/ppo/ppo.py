@@ -396,11 +396,13 @@ if __name__ == "__main__":
     agent = Agent(envs).to(device)
     optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
 
+    gap_eval_env = gym.vector.SyncVectorEnv([
+        _make_cpu_env(seed=args.seed + 200000, reconfiguration_freq=None, ignore_terminations=False)
+    ])
     gap_stats = buffer_gap.BufferGapV2(
         args.return_buffer_size, args.top_return_buff_percentage,
-        policy=agent, device=device, args=args, envs=None,
+        policy=agent, device=device, args=args, envs=gap_eval_env,
     )
-    gap_stats._last_eval = float("inf")  # skip env-based eval (ManiSkill env incompatible with cleanrl interface)
     _ep_return_buf = torch.zeros(args.num_envs, device=device)
 
     # ALGO Logic: Storage setup
@@ -678,3 +680,4 @@ if __name__ == "__main__":
         logger.close()
     envs.close()
     eval_envs.close()
+    gap_eval_env.close()

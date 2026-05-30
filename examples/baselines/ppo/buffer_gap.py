@@ -122,7 +122,8 @@ class BufferGapV2():
         writer.add_scalar("charts/avg_top_returns_local", np.mean(heapq.nlargest(max(int(self._top_buffer_percet * len(returns_)), 1), returns_)), step)
         writer.add_scalar("charts/global_optimality_gap", np.mean(list(_max_returns)) - np.mean(returns_), step)
         writer.add_scalar("charts/local_optimality_gap", np.mean(heapq.nlargest(max(int(self._top_buffer_percet * len(returns_)), 1), returns_)) - np.mean(returns_), step)
-        
+        writer.add_scalar("charts/avg_return", np.mean(returns_), step)
+
         ## Get performance for the deterministic policy
         if step - self._last_eval > 10000:
             returns = self.eval_deterministic()
@@ -149,7 +150,7 @@ class BufferGapV2():
         obs, _ = self._envs.reset(seed=self._args.seed)
         # q_values = self._policy(torch.Tensor(obs).to(self._device))
         
-        max_t = len(self._best_traj) if best==True else self._envs.envs[0].spec.max_episode_steps
+        max_t = len(self._best_traj) if best==True else getattr(self._args, 'num_eval_steps', 200)
         max_t = 100000 if max_t==None else max_t
         samples_ = 1
         returns = []
@@ -158,8 +159,8 @@ class BufferGapV2():
             # obs, _ = self._envs.reset()
             # returns_ = np.zeros(self._envs.num_envs, dtype=np.float32)
             for t in range(max_t):
-                
-                actions = [self._best_traj[t] for _ in range(self._envs.num_envs)] if best==True else self._policy.get_action_deterministic(torch.Tensor(obs).to(self._device)).cpu().numpy()
+
+                actions = [self._best_traj[t] for _ in range(self._envs.num_envs)] if best==True else self._policy.get_action(torch.Tensor(obs).to(self._device), deterministic=True).detach().cpu().numpy()
 
                 obs, reward, terminations, truncations, infos = self._envs.step(actions)
                 return_ += reward[0]
