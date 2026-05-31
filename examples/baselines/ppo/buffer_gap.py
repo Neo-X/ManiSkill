@@ -81,6 +81,7 @@ class BufferGapV2():
 
         self._best_traj = []
         self._best_traj_r = []
+        self._best_traj_seed = None
 
 
     def add(self, info):
@@ -93,6 +94,7 @@ class BufferGapV2():
             self._max_return = return_
             self._best_traj = info["actions"]
             self._best_traj_r = info["rewards"]
+            self._best_traj_seed = info.get("seed")
      
         # The element to be stored in the heap is a tuple: (return, plan)
         new_heap_item = (return_, plan)
@@ -140,36 +142,30 @@ class BufferGapV2():
             print(f"Stochastic Eval Return: {np.mean(returns)} at step {step}")
 
  
-    def eval_deterministic(self, best=False) -> np.ndarray:
+    def eval_deterministic(self, best=False, envs=None) -> np.ndarray:
         """
-        Evaluate the policy deterministically
+        Evaluate the policy deterministically.
+        Pass envs to override self._envs (e.g. a GPU-rendered env for video recording).
         """
-        """
-        Evaluate the policy deterministically
-        """
-        obs, _ = self._envs.reset(seed=self._args.seed)
-        # q_values = self._policy(torch.Tensor(obs).to(self._device))
-        
+        _envs = envs if envs is not None else self._envs
+        reset_seed = (self._best_traj_seed if best and self._best_traj_seed is not None
+                      else self._args.seed)
+        obs, _ = _envs.reset(seed=reset_seed)
         max_t = len(self._best_traj) if best==True else getattr(self._args, 'num_eval_steps', 200)
         max_t = 100000 if max_t==None else max_t
         samples_ = 1
         returns = []
         for j in range(samples_):
             return_ = 0.0
-            # obs, _ = self._envs.reset()
-            # returns_ = np.zeros(self._envs.num_envs, dtype=np.float32)
             for t in range(max_t):
-
-                actions = [self._best_traj[t] for _ in range(self._envs.num_envs)] if best==True else self._policy.get_action(torch.Tensor(obs).to(self._device), deterministic=True).detach().cpu().numpy()
-
-                obs, reward, terminations, truncations, infos = self._envs.step(actions)
+                actions = [self._best_traj[t] for _ in range(_envs.num_envs)] if best==True else self._policy.get_action(torch.as_tensor(obs).to(self._device), deterministic=True).detach().cpu().numpy()
+                obs, reward, terminations, truncations, infos = _envs.step(actions)
                 return_ += reward[0]
                 if "final_info" in infos:
                     for info in infos["final_info"]:
                         if info and "episode" in info:
                             return info['episode']['r']
             returns.append(return_)
-        # assert(len(returns) == samples_), f"Returns length is {len(returns)} while expected {samples_}"
         return np.mean(returns)
 
     def eval_stochastic(self) -> np.ndarray:

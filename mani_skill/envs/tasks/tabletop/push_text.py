@@ -40,8 +40,12 @@ TILE_HALF_SIZE = [0.040, 0.030, 0.012]
 TARGET_CENTER = [-0.10, 0.00]
 TILE_SPACING = 0.130   # center-to-center (m) — doubled with letter scale
 
-# Spawn region for letters at episode start
+# Spawn region for letters at episode start (random layout)
 SPAWN_BOUNDS = [[-0.05, -0.20], [0.15, 0.20]]
+
+# Fixed spawn position for letters when fixed_layout=True:
+# tiles appear in a row at this x, same y-spacing as targets, 0° in-plane rotation.
+FIXED_SPAWN_CENTER_X = 0.08
 
 # Success / reward thresholds
 PLACE_THRESH = 0.025   # letter xy distance to target for "placed"
@@ -112,10 +116,12 @@ class PushTextEnv(BaseEnv):
         robot_uids="panda_wristcam",
         robot_init_qpos_noise: float = 0.02,
         goal_text: str = "AT",
+        fixed_layout: bool = False,
         **kwargs,
     ):
         self.robot_init_qpos_noise = robot_init_qpos_noise
         self.goal_text = goal_text.upper().replace(" ", "")[:MAX_LETTERS]
+        self.fixed_layout = fixed_layout
         super().__init__(*args, robot_uids=robot_uids, **kwargs)
 
     @property
@@ -243,23 +249,37 @@ class PushTextEnv(BaseEnv):
                 xyz[:, 2] = TILE_HALF_SIZE[2] + 1e-3
                 marker.set_pose(Pose.create_from_pq(p=xyz, q=target_q))
 
-            # Spawn letter tiles at random non-overlapping positions
-            sampler = randomization.UniformPlacementSampler(
-                bounds=SPAWN_BOUNDS, batch_size=b, device=self.device
-            )
-            # minimum separation = diagonal of tile footprint + small gap
-            radius = float(np.linalg.norm(TILE_HALF_SIZE[:2])) + 0.005
-
-            center_xy = torch.zeros(b, 2)
-            for tile in self.letter_tiles:
-                xy = center_xy + sampler.sample(radius, 100, verbose=False)
-                xyz = torch.zeros(b, 3)
-                xyz[:, :2] = xy
-                xyz[:, 2] = TILE_HALF_SIZE[2] + 1e-3
-                qs = randomization.random_quaternions(
-                    b, lock_x=True, lock_y=True, lock_z=False, device=self.device
+            if self.fixed_layout:
+                # Fixed positions: one row at FIXED_SPAWN_CENTER_X, same y-spacing as
+                # targets, identity in-plane rotation.  Every episode is identical.
+                n = len(self.letter_tiles)
+                total_span = (n - 1) * TILE_SPACING
+                identity_q = torch.tensor([[1.0, 0.0, 0.0, 0.0]], device=self.device).expand(b, -1)
+                for i, tile in enumerate(self.letter_tiles):
+                    ty = TARGET_CENTER[1] - total_span / 2 + i * TILE_SPACING
+                    xyz = torch.zeros(b, 3)
+                    xyz[:, 0] = FIXED_SPAWN_CENTER_X
+                    xyz[:, 1] = ty
+                    xyz[:, 2] = TILE_HALF_SIZE[2] + 1e-3
+                    tile.set_pose(Pose.create_from_pq(p=xyz, q=identity_q))
+            else:
+                # Random non-overlapping positions
+                sampler = randomization.UniformPlacementSampler(
+                    bounds=SPAWN_BOUNDS, batch_size=b, device=self.device
                 )
-                tile.set_pose(Pose.create_from_pq(p=xyz, q=qs))
+                # minimum separation = diagonal of tile footprint + small gap
+                radius = float(np.linalg.norm(TILE_HALF_SIZE[:2])) + 0.005
+
+                center_xy = torch.zeros(b, 2)
+                for tile in self.letter_tiles:
+                    xy = center_xy + sampler.sample(radius, 100, verbose=False)
+                    xyz = torch.zeros(b, 3)
+                    xyz[:, :2] = xy
+                    xyz[:, 2] = TILE_HALF_SIZE[2] + 1e-3
+                    qs = randomization.random_quaternions(
+                        b, lock_x=True, lock_y=True, lock_z=False, device=self.device
+                    )
+                    tile.set_pose(Pose.create_from_pq(p=xyz, q=qs))
 
     # ------------------------------------------------------------------
     # Evaluation

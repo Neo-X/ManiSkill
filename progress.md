@@ -113,6 +113,26 @@ The robot must pick up and place fridge-magnet-style letter tiles on a white tab
 - **Result:** `eval_success_rate=0.0000`, `eval_mean_reward≈0.135`
 - **Notes:** Added a bridging reward term: `proximity(tcp→tile) × gripper_close_frac` to encourage closing the gripper when near a tile (filling the reward gap between reach=2 and grasped=4). No improvement. Conclusion: reward shaping alone does not solve the exploration problem — the policy cannot discover structured grasping behaviour through random Gaussian noise on a 9-DoF arm. **Better structured exploration is needed.**
 
+### Experiment 3 — Gap metrics + deterministic eval videos (2026-05-30)
+- **Run:** `push-text-gap-metrics` · seed 42 · wandb: `real-lab/ManiSkill`
+- **Config:** 32 envs, async CPU, 1M steps, ~795 SPS
+- **Gap metrics logged:** `charts/best_trajectory_return`, `charts/avg_top_returns_global`, `charts/avg_top_returns_local`, `charts/global_optimality_gap`, `charts/local_optimality_gap`, `charts/avg_return`, `charts/deterministic_returns`
+- **Two eval videos per checkpoint:** `eval/policy_video` (deterministic policy, seed varies) and `eval/deterministic_eval_video` (wraps `BufferGapV2.eval_deterministic()`, fixed seed)
+
+#### Blocker: best-trajectory replay is meaningless due to environment stochasticity
+The `eval/deterministic_eval_video` replays the best stored action sequence from a **fixed seed**, but the original episode used a **different random seed** — so the letter positions at the start of the replay differ from the original episode. The replayed actions no longer correspond to the scene geometry they were optimised for, making the video uninterpretable.
+
+More broadly, this reveals a fundamental measurement problem: **we cannot currently determine whether the policy is an exploration problem or an exploitation problem**, because:
+1. **Goal stochasticity** — letter spawn positions differ every episode, so the same action sequence produces different outcomes. The best trajectory in one episode cannot be transferred to another.
+2. **Possible additional stochasticity** — there may be other sources of randomness (physics, control noise) that further prevent clean trajectory replay.
+
+#### What is needed to diagnose exploration vs exploitation
+To use `BufferGapV2` as intended (measuring whether high-return trajectories exist in the buffer but the policy fails to reproduce them), we need either:
+- **Fix the initial state** — use a single fixed seed for all training episodes so the same scene is always presented and trajectories are comparable. Then the gap metrics cleanly measure exploitation ability.
+- **Or condition trajectory storage on the initial state** — store `(seed, actions, return)` triples and only replay on matching seeds. Complex to implement.
+
+The **fixed-seed approach** is simpler and directly answers the question: given a fixed goal configuration, does the agent ever stumble upon a near-successful trajectory (exploration), and if so, does PPO learn to reproduce it (exploitation)?
+
 ## PushText Environment — Planned Improvements
 
 ### Short-term
@@ -120,6 +140,7 @@ The robot must pick up and place fridge-magnet-style letter tiles on a white tab
 - [x] **2. Bigger, more visible letters** — 2× scale (`LETTER_SCALE=[2,2,2]`), `TILE_HALF_SIZE` and `TILE_SPACING` doubled
 - [x] **3. Image-based reward (OCR)** — top-down `base_camera` (robot hidden via `get_table_view()`); EasyOCR at 2× upscale detects goal word every 20 steps; +2 reward bonus; videos in `runs/push-text/`
 - [ ] **4. Randomize goal letter** — sample goal word randomly each episode instead of hardcoding "AT"
+- [ ] **7. Fixed-seed training mode** — add a `--fixed_seed` flag that resets all envs to the same seed every episode, eliminating goal stochasticity. Required to make `BufferGapV2` gap metrics meaningful: with stochastic initial states the best stored trajectory cannot be replayed or compared across episodes, so exploration vs exploitation cannot be diagnosed. With a fixed scene, `charts/global_optimality_gap` directly measures whether the policy fails to learn from good trajectories it has already seen.
 
 ### Medium-term
 - [ ] **5. Dictionary word sampling** — start with 2–3 letter words from a filtered word list; use the text detection model from (3) to verify the formed word matches the goal; curriculum: increase word length as success rate improves
@@ -151,7 +172,32 @@ The robot must pick up and place fridge-magnet-style letter tiles on a white tab
   ```
 - GCP interactive debug: launch `ppo-debug` (n1-standard-8, COS, northamerica-northeast1-a), SSH via IAP, run docker manually to see errors live
 
-### GCP spot instance launcher: `scripts/launch_gcp_job.py`
+### Unified launcher: `scripts/launch_xm_slurm.py` ← **use this for all remote jobs**
+
+XManager-based launcher supporting GCP Vertex AI and Slurm clusters from a single script.
+All new experiments should be launched through this script rather than the older `launch_gcp_job.py`.
+
+```bash
+# GCP Vertex AI (spot, 8 CPUs)
+uv run scripts/launch_xm_slurm.py ppo-fixed-layout --cluster gcp
+uv run scripts/launch_xm_slurm.py ppo-training     --cluster gcp
+
+# Mila Slurm cluster
+uv run scripts/launch_xm_slurm.py ppo-fixed-layout --cluster mila --user <username>
+
+# DRAC / ComputeCanada
+uv run scripts/launch_xm_slurm.py ppo-fixed-layout --cluster drac --user <username>
+```
+
+One-time GCP setup (already done):
+- GCS staging bucket: `gs://legoassembly-xmanager`
+- Vertex AI API enabled on project `legoassembly`
+- Service account `xmanager@legoassembly.iam.gserviceaccount.com` with `roles/aiplatform.user`, `roles/storage.objectAdmin`, `roles/logging.logWriter`
+- Docker image mirrored to `gcr.io/legoassembly/gberseth/maniskill-ppo:latest` (xmanager pushes automatically)
+- All GCP jobs use **SPOT** provisioning (patched into `aiplatform.CustomJob.submit`)
+- All jobs capped at **8 CPUs / 16 GiB RAM**
+
+### GCP spot instance launcher: `scripts/launch_gcp_job.py` ← legacy, prefer launch_xm_slurm.py
 - Uses Debian 12 + installs Docker at startup
 - Self-deletes instance on job completion or crash via `trap self_delete EXIT`
 - Requires `roles/compute.instanceAdmin.v1` on the default compute SA (one-time setup):

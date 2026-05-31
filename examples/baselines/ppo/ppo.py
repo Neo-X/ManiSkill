@@ -123,6 +123,8 @@ class Args:
     """top-k% of returns to use as the experience-optimal estimate"""
     plot_freq: int = 5
     """log gap metrics every this many PPO iterations"""
+    fixed_layout: bool = False
+    """if toggled, letter tiles spawn at fixed positions every episode (no randomization)"""
 
 
     # to be filled in runtime
@@ -219,8 +221,12 @@ if __name__ == "__main__":
     render_mode = "rgb_array" if (args.capture_video and args.evaluate) else None
     render_backend = "gpu" if (args.capture_video and args.evaluate) else "none"
     env_kwargs: dict[str, object] = dict(obs_mode="state", render_mode=render_mode, render_backend=render_backend, sim_backend="physx_cpu")
+    if args.fixed_layout:
+        env_kwargs["fixed_layout"] = True
     # Separate kwargs for on-demand video capture (always GPU-rendered)
     video_env_kwargs: dict[str, object] = dict(obs_mode="state", render_mode="rgb_array", render_backend="gpu", sim_backend="physx_cpu")
+    if args.fixed_layout:
+        video_env_kwargs["fixed_layout"] = True
     if args.control_mode is not None:
         env_kwargs["control_mode"] = args.control_mode
         video_env_kwargs["control_mode"] = args.control_mode
@@ -232,11 +238,16 @@ if __name__ == "__main__":
     train_num_envs = args.num_envs if not args.evaluate else 1
 
     eval_output_dir = None
+    policy_video_dir = None
+    deterministic_eval_video_dir = None
     if args.capture_video:
-        eval_output_dir = f"runs/{run_name}/videos"
         if args.evaluate:
             assert args.checkpoint is not None
             eval_output_dir = f"{os.path.dirname(args.checkpoint)}/test_videos"
+        else:
+            eval_output_dir = f"runs/{run_name}/videos"
+            policy_video_dir = f"runs/{run_name}/videos/policy"
+            deterministic_eval_video_dir = f"runs/{run_name}/videos/deterministic_eval"
         print(f"Saving eval videos to {eval_output_dir}")
 
     def _make_cpu_env(seed: int, reconfiguration_freq: Optional[int], ignore_terminations: bool,
@@ -289,17 +300,29 @@ if __name__ == "__main__":
         eval_envs = ManiSkillVectorEnv(eval_envs, args.num_eval_envs, ignore_terminations=not args.eval_partial_reset, record_metrics=True)
     assert isinstance(envs.single_action_space, gym.spaces.Box), "only continuous action space is supported"
 
-    def record_video_episode(step: int = 0) -> Optional[str]:
-        """Create a temporary single GPU env, run one episode with RecordEpisode, return the saved video path."""
-        if eval_output_dir is None:
+    def _make_gpu_video_env(out_dir: str, num_steps: int):
+        """Create a temporary GPU-rendered env with RecordEpisode for one episode."""
+        os.makedirs(out_dir, exist_ok=True)
+        vid_env = gym.make(args.env_id, num_envs=1, **video_env_kwargs)
+        if isinstance(vid_env.action_space, gym.spaces.Dict):
+            vid_env = FlattenActionSpaceWrapper(vid_env)
+        vid_env = RecordEpisode(vid_env, output_dir=out_dir, save_trajectory=False,
+                                max_steps_per_video=num_steps, video_fps=30)
+        return vid_env
+
+    def _latest_video(out_dir: str) -> Optional[str]:
+        videos = sorted(
+            [f for f in os.listdir(out_dir) if f.endswith(".mp4")],
+            key=lambda f: os.path.getmtime(os.path.join(out_dir, f)),
+        )
+        return os.path.join(out_dir, videos[-1]) if videos else None
+
+    def record_video_policy(step: int = 0) -> Optional[str]:
+        """Record the current deterministic policy for one episode (seed varies by step)."""
+        if policy_video_dir is None:
             return None
-        os.makedirs(eval_output_dir, exist_ok=True)
         try:
-            vid_env = gym.make(args.env_id, num_envs=1, **video_env_kwargs)
-            if isinstance(vid_env.action_space, gym.spaces.Dict):
-                vid_env = FlattenActionSpaceWrapper(vid_env)
-            vid_env = RecordEpisode(vid_env, output_dir=eval_output_dir, save_trajectory=False,
-                                    max_steps_per_video=args.num_eval_steps, video_fps=30)
+            vid_env = _make_gpu_video_env(policy_video_dir, args.num_eval_steps)
             vid_env = ManiSkillVectorEnv(vid_env, 1, ignore_terminations=True, record_metrics=False)
             obs_v, _ = vid_env.reset(seed=args.seed + step)
             obs_v = to_tensor(obs_v)
@@ -310,13 +333,23 @@ if __name__ == "__main__":
                     obs_v = to_tensor(obs_v)
             vid_env.close()
         except Exception as e:
-            print(f"Warning: video capture failed: {e}")
+            print(f"Warning: policy video capture failed: {e}")
             return None
-        videos = sorted(
-            [f for f in os.listdir(eval_output_dir) if f.endswith(".mp4")],
-            key=lambda f: os.path.getmtime(os.path.join(eval_output_dir, f)),
-        )
-        return os.path.join(eval_output_dir, videos[-1]) if videos else None
+        return _latest_video(policy_video_dir)
+
+    def record_video_deterministic_eval(step: int = 0) -> Optional[str]:
+        """Record eval_deterministic() running on a GPU-rendered env (fixed seed=args.seed)."""
+        if deterministic_eval_video_dir is None:
+            return None
+        try:
+            vid_env = _make_gpu_video_env(deterministic_eval_video_dir, args.num_eval_steps)
+            agent.eval()
+            gap_stats.eval_deterministic(envs=vid_env)
+            vid_env.close()
+        except Exception as e:
+            print(f"Warning: deterministic eval video capture failed: {e}")
+            return None
+        return _latest_video(deterministic_eval_video_dir)
 
     def to_tensor(x):
         if isinstance(x, torch.Tensor):
@@ -474,14 +507,17 @@ if __name__ == "__main__":
                     logger.add_scalar(f"eval/{k}", mean, global_step)
                 print(f"eval_{k}_mean={mean}")
 
-            # Capture and upload a video to wandb every wandb_video_freq steps
+            # Capture and upload videos to wandb every wandb_video_freq steps
             if (args.track and args.capture_video
                     and args.wandb_video_freq > 0
                     and global_step - last_video_log_step >= args.wandb_video_freq):
-                print(f"Capturing eval video at step {global_step}")
-                video_path = record_video_episode(step=global_step)
-                if video_path:
-                    wandb.log({"eval/video": wandb.Video(video_path, fps=30, format="mp4")}, step=global_step)
+                print(f"Capturing eval videos at step {global_step}")
+                policy_path = record_video_policy(step=global_step)
+                if policy_path:
+                    wandb.log({"eval/policy_video": wandb.Video(policy_path, fps=30, format="mp4")}, step=global_step)
+                det_eval_path = record_video_deterministic_eval(step=global_step)
+                if det_eval_path:
+                    wandb.log({"eval/deterministic_eval_video": wandb.Video(det_eval_path, fps=30, format="mp4")}, step=global_step)
                 last_video_log_step = global_step
 
             if args.evaluate:
@@ -525,8 +561,10 @@ if __name__ == "__main__":
             _ep_return_buf += reward.view(-1)
             done_mask = next_done.bool()
             if done_mask.any():
-                for ret in _ep_return_buf[done_mask].cpu().tolist():
-                    gap_stats.add({"r": ret, "actions": [], "rewards": []})
+                for env_idx in done_mask.nonzero(as_tuple=False).flatten().tolist():
+                    gap_stats.add({"r": _ep_return_buf[env_idx].item(),
+                                   "actions": [], "rewards": [],
+                                   "seed": args.seed + env_idx})
                 _ep_return_buf[done_mask] = 0.0
 
             if "final_info" in infos:

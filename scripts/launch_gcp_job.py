@@ -61,7 +61,22 @@ JOBS = {
             " --use-async-vector-env --num-envs 32 --no-capture-video"
             " --num-eval-envs 4 --num-steps 50 --num-eval-steps 200"
             " --total-timesteps 10000000 --eval-freq 125"
-            " --exp-name push-text-state-ppo"
+            " --seed 42 --return-buffer-size 10000"
+            " --exp-name push-text-gap-metrics-10M"
+        ),
+        machine_type="e2-standard-32",
+        use_wandb=True,
+    ),
+    "ppo-fixed-layout": dict(
+        image="gberseth/maniskill-ppo:latest",
+        cmd=(
+            "python /app/examples/baselines/ppo/ppo.py"
+            " --track --wandb-project-name ManiSkill --wandb-entity real-lab"
+            " --use-async-vector-env --num-envs 32 --no-capture-video"
+            " --num-eval-envs 4 --num-steps 50 --num-eval-steps 200"
+            " --total-timesteps 1000000 --eval-freq 25"
+            " --seed 42 --return-buffer-size 10000 --fixed-layout"
+            " --exp-name push-text-fixed-layout-gcp"
         ),
         machine_type="e2-standard-32",
         use_wandb=True,
