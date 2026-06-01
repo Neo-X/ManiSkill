@@ -15,6 +15,44 @@ import torch
 from gymnasium.vector.utils import batch_space
 
 import mani_skill.render.utils as render_utils
+
+_render_material_patched = False
+
+def _patch_render_material_noop():
+    """Monkey-patch SAPIEN's visual loading to a no-op when render_backend="none".
+
+    SAPIEN's URDF loader calls RenderMaterial() unconditionally during robot loading, which
+    requires a Vulkan device. When render_backend="none" (headless CPU training), visual
+    components are never added to the scene (can_render() is False), so the no-op is safe.
+    We avoid test-creating RenderMaterial() first — that partial init breaks SAPIEN's state.
+    """
+    global _render_material_patched
+    if _render_material_patched:
+        return
+
+    class _NoopMaterial:
+        """Drop-in for RenderMaterial that does nothing — safe when visuals are never rendered."""
+        def __init__(self, *a, **kw):
+            pass
+        def __getattr__(self, name):
+            return lambda *a, **kw: None
+
+    # Patch everywhere RenderMaterial is accessed.
+    import sapien.render as _sr
+    _sr.RenderMaterial = _NoopMaterial
+
+    import sapien.wrapper.urdf_loader as _ul
+    _ul.RenderMaterial = _NoopMaterial
+
+    # Newer SAPIEN versions call RenderMaterial inside ActorBuilder.add_visual_from_file.
+    try:
+        import sapien.wrapper.actor_builder as _ab
+        if hasattr(_ab, "ActorBuilder"):
+            _ab.ActorBuilder.add_visual_from_file = lambda *a, **kw: None
+    except Exception:
+        pass
+
+    _render_material_patched = True
 from mani_skill import logger
 from mani_skill.agents import REGISTERED_AGENTS, BaseAgent, MultiAgent
 from mani_skill.envs.scene import ManiSkillScene
@@ -240,6 +278,8 @@ class BaseEnv(gym.Env):
         self.device = self.backend.device
         self._sim_device = self.backend.sim_device
         self._render_device = self.backend.render_device
+        if self.backend.render_device is None:
+            _patch_render_material_noop()
         if self.device.type == "cuda":
             if not physx.is_gpu_enabled():
                 physx.enable_gpu()

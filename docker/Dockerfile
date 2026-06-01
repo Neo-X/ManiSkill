@@ -62,6 +62,7 @@ RUN pip install torch tensorboard wandb
 WORKDIR /app
 COPY mani_skill/ /opt/conda/lib/python3.9/site-packages/mani_skill/
 COPY examples/ /app/examples/
+COPY tests/ /app/tests/
 
 # download physx GPU binary via sapien
 RUN python -c "exec('import sapien.physx as physx;\ntry:\n  physx.enable_gpu()\nexcept:\n  pass;')"
