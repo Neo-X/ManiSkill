@@ -3,51 +3,11 @@
 
 ## A special buffer to help track the optimality gap between data generated
 from typing import Any, Dict, Generator, List, Optional, Union
-try:
-    from stable_baselines3.common.buffers import ReplayBuffer
-except ImportError:
-    ReplayBuffer = object  # BufferGap (SB3-based) unused; only BufferGapV2 is used here
 from gymnasium import spaces
 import numpy as np
 import torch as th
 
-class BufferGap(ReplayBuffer):
-    """
-    A special buffer to help track the optimality gap between data generated
-    by the agent and the optimal policy.
-    """
 
-    def __init__(self, 
-        buffer_size: int,
-        observation_space: spaces.Space,
-        action_space: spaces.Space,
-        device: Union[th.device, str] = "auto",
-        n_envs: int = 1,
-        optimize_memory_usage: bool = False,
-        handle_timeout_termination: bool = True,
-        *args, **kwargs):
-        super().__init__(buffer_size, observation_space, action_space, device, n_envs,
-                         optimize_memory_usage, handle_timeout_termination)
-        # super().__init__(*args, **kwargs)
-        self.gap = 0.0
-        self._gap_percentage = 0.05
-        self.returns = np.zeros((self.buffer_size, self.n_envs), dtype=np.float32)
-
-
-    def add(
-        self,
-        obs: np.ndarray,
-        next_obs: np.ndarray,
-        action: np.ndarray,
-        reward: np.ndarray,
-        done: np.ndarray,
-        infos: List[Dict[str, Any]],
-    ) -> None:
-        
-        ## Check is the info dictionary contains the return key "r" if it does add that to the returns vector
-        
-        self.returns[self.pos] = np.array([info.get("return") for info in infos])
-        super().add(obs, next_obs, action, reward, done, infos)
 
 import heapq, collections, torch
 import gymnasium as gym
@@ -82,12 +42,14 @@ class BufferGapV2():
         self._best_traj = []
         self._best_traj_r = []
         self._best_traj_seed = None
+        self._plan_counter = 0
 
 
     def add(self, info):
         return_ = info.get("r")
         self._returns.append(return_)
-        plan = list(info.get("actions"))
+        plan = list(info.get("actions", []))
+        plan_states = list(info.get("observations", []))
     
         ## Store the best trajectory
         if return_ > self._max_return:
@@ -96,8 +58,9 @@ class BufferGapV2():
             self._best_traj_r = info["rewards"]
             self._best_traj_seed = info.get("seed")
      
-        # The element to be stored in the heap is a tuple: (return, plan)
-        new_heap_item = (return_, plan)
+        # Include a monotonic counter so heap comparisons never depend on arrays.
+        new_heap_item = (return_, self._plan_counter, plan, plan_states)
+        self._plan_counter += 1
 
         current_heap_size = len(self._top_k_plans)
 
@@ -116,9 +79,11 @@ class BufferGapV2():
         """
         Plot the gap between the current return and the maximum return
         """
+        if not self._top_k_plans:
+            return
         returns_ = list(self._returns)
         heapq.heapify(returns_)
-        _max_returns = [ret for ret, plan in self._top_k_plans] ## Extract the returns from the (return, plan) tuples
+        _max_returns = [ret for ret, _, plan, obs_plan in self._top_k_plans] ## Extract the returns from the (return, plan) tuples
         writer.add_scalar("charts/best_trajectory_return", self._max_return, step)
         writer.add_scalar("charts/avg_top_returns_global", np.mean(list(_max_returns)), step)
         writer.add_scalar("charts/avg_top_returns_local", np.mean(heapq.nlargest(max(int(self._top_buffer_percet * len(returns_)), 1), returns_)), step)
@@ -136,10 +101,52 @@ class BufferGapV2():
             returns = self.eval_deterministic(best=True)
             if returns is not None:
                 writer.add_scalar("charts/replay_best_returns", np.mean(returns), step)
-            returns = self.eval_stochastic()
-            if returns is not None:
-                writer.add_scalar("charts/replay_top_k_returns_stochastic", np.mean(returns), step)
-            print(f"Stochastic Eval Return: {np.mean(returns)} at step {step}")
+            # returns = self.eval_stochastic()
+            # if returns is not None:
+            #     writer.add_scalar("charts/replay_top_k_returns_stochastic", np.mean(returns), step)
+            # print(f"Stochastic Eval Return: {np.mean(returns)} at step {step}")
+
+    def get_top_batch(self, batch_size: int, device=None):
+        """
+           The goal in this particular GET version is to be able to grab a batch of data.
+           Pull four random plans from the heap and then convert those into vectors and then return that as the batch.
+        """
+
+        if batch_size <= 0 or not self._top_k_plans:
+            return None
+
+        # Sample up to 4 random plans from the heap
+        num_plans_to_sample = min(4, len(self._top_k_plans))
+        sampled_indices = np.random.choice(len(self._top_k_plans), size=num_plans_to_sample, replace=False)
+        
+        observations = []
+        actions = []
+        ## Combine plans into long vectors for PPO training.
+        for idx in sampled_indices:
+            _, _, plan, plan_states = self._top_k_plans[idx]
+            if len(plan) == 0 or len(plan_states) == 0:
+                continue
+
+            plan_array = np.asarray(plan, dtype=np.float32)
+            obs_array = np.asarray(plan_states, dtype=np.float32)
+            traj_len = min(len(plan_array), len(obs_array))
+            if traj_len == 0:
+                continue
+
+            actions.append(plan_array[:traj_len])
+            observations.append(obs_array[:traj_len])
+
+        if not observations:
+            return None
+
+        all_observations = np.concatenate(observations, axis=0)
+        all_actions = np.concatenate(actions, axis=0)
+        target_device = self._device if device is None else device
+
+        return {
+            "observations": torch.as_tensor(all_observations, dtype=torch.float32, device=target_device),
+            "actions": torch.as_tensor(all_actions, dtype=torch.float32, device=target_device),
+        }
 
  
     def eval_deterministic(self, best=False, envs=None) -> np.ndarray:
@@ -161,10 +168,8 @@ class BufferGapV2():
                 actions = [self._best_traj[t] for _ in range(_envs.num_envs)] if best==True else self._policy.get_action(torch.as_tensor(obs).to(self._device), deterministic=True).detach().cpu().numpy()
                 obs, reward, terminations, truncations, infos = _envs.step(actions)
                 return_ += reward[0]
-                if "final_info" in infos:
-                    for info in infos["final_info"]:
-                        if info and "episode" in info:
-                            return info['episode']['r']
+                if terminations.any() or truncations.any():
+                    return return_
             returns.append(return_)
         return np.mean(returns)
 
@@ -175,10 +180,13 @@ class BufferGapV2():
         # obs, _ = self._envs.reset(seed=self._args.seed)
         returns = []
         samples_ = 5
+        valid_plans = [item for item in self._top_k_plans if len(item[2]) > 0]
+        if not valid_plans:
+            return None
         for j in range(samples_):
             obs, _ = self._envs.reset(seed=self._args.seed)
             returns_ = np.zeros(self._envs.num_envs, dtype=np.float32)
-            plan = self._top_k_plans[np.random.randint(0, len(self._top_k_plans))][1] ## Sample a plan from the top k plans
+            plan = valid_plans[np.random.randint(0, len(valid_plans))][2] ## Sample a plan from the top k plans
             max_t = len(plan)
             for t in range(max_t):
                 

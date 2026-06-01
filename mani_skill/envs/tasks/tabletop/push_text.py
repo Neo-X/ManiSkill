@@ -462,10 +462,10 @@ class PushTextEnv(BaseEnv):
 
         for i, tile in enumerate(self.letter_tiles):
             tile_pos = tile.pose.p                                    # (b, 3)
-            tcp_to_tile = torch.linalg.norm(tcp - tile_pos, dim=1)   # (b,)
+            tcp_to_tile_dist = torch.linalg.norm(tcp - tile_pos, dim=1)   # (b,)
 
             # Stage 0: reach
-            letter_rew = 2 * (1 - torch.tanh(5 * tcp_to_tile))
+            letter_rew = 2 * (1 - torch.tanh(5 * tcp_to_tile_dist))  # (b,), max = 2.0 when TCP is on top of tile
 
             # Pre-grasp bridge: reward closing the gripper when TCP is near the tile.
             # Creates a gradient from "hover near tile" → "close gripper" → trigger is_grasping.
@@ -473,7 +473,7 @@ class PushTextEnv(BaseEnv):
             gripper_close_frac = 1.0 - (
                 self.agent.robot.get_qpos()[:, -2:].sum(dim=1) / gripper_width
             )  # 0 = fully open, 1 = fully closed
-            proximity = 1.0 - torch.clamp(tcp_to_tile / 0.10, 0.0, 1.0)
+            proximity = 1.0 - torch.clamp(tcp_to_tile_dist / 0.10, 0.0, 1.0)
             pre_grasp_rew = proximity * gripper_close_frac  # (b,), max = 1.0
             pre_grasp_rew = torch.where(
                 is_grasped[:, i] | is_placed[:, i],
@@ -483,8 +483,18 @@ class PushTextEnv(BaseEnv):
             letter_rew = letter_rew + pre_grasp_rew
 
             # Stage 1: grasped — reward for moving tile toward target
-            place_rew = 1 - torch.tanh(5.0 * dists[:, i])
-            letter_rew = torch.where(is_grasped[:, i], 4 + place_rew, letter_rew)
+            ## Compute the vector from the tile to the target, and the tile's velocity vector. The reward is based on the cosine similarity between these vectors, encouraging the tile to move directly toward the target.
+            direction_of_tile_to_target = torch.atan2(
+                tile_pos[:, 1] - self.target_xys[i][1], tile_pos[:, 0] - self.target_xys[i][0]
+            )  # (b,)
+            tile_velocity_direction = torch.atan2(
+                tile.linear_velocity[:, 1], tile.linear_velocity[:, 0]
+            )  # (b,)
+            angle_diff = torch.abs(direction_of_tile_to_target - tile_velocity_direction)
+            angle_diff = torch.where(angle_diff > np.pi, 2 * np.pi - angle_diff, angle_diff)  # wrap to [0, π]
+            direction_rew = 1.0 - angle_diff / np.pi  # (b,), 1.0 when perfectly aligned, 0.0 when moving perpendicular or away
+            # place_rew = 1 - torch.tanh(5.0 * dists[:, i])
+            letter_rew = torch.where(is_grasped[:, i], 4 + direction_rew, letter_rew)
 
             # Stage 2: placed — reward for releasing and becoming static
             ungrasp_rew = (

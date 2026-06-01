@@ -9,6 +9,7 @@ import gymnasium as gym
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.optim as optim
 import tyro
 from torch.distributions.normal import Normal
@@ -125,6 +126,10 @@ class Args:
     """log gap metrics every this many PPO iterations"""
     fixed_layout: bool = False
     """if toggled, letter tiles spawn at fixed positions every episode (no randomization)"""
+    bc_coef: float = 0.1
+    """weight on the behavior cloning loss from top-return trajectories"""
+    bc_batch_size: int = 256
+    """number of observation-action pairs sampled from the return buffer per optimizer step"""
 
 
     # to be filled in runtime
@@ -260,6 +265,8 @@ if __name__ == "__main__":
                 env = RecordEpisode(env, output_dir=video_output_dir, save_trajectory=args.evaluate,
                                     trajectory_name="trajectory", max_steps_per_video=args.num_eval_steps, video_fps=30)
             env = CPUGymWrapper(env, ignore_terminations=ignore_terminations, record_metrics=True)
+            import buffer_gap
+            env = buffer_gap.RecordEpisodeStatisticsV2(env)
             env.action_space.seed(seed)
             env.observation_space.seed(seed)
             return env
@@ -563,7 +570,7 @@ if __name__ == "__main__":
             if done_mask.any():
                 for env_idx in done_mask.nonzero(as_tuple=False).flatten().tolist():
                     gap_stats.add({"r": _ep_return_buf[env_idx].item(),
-                                   "actions": [], "rewards": [],
+                                   "actions": [], "rewards": [], "observations": [],
                                    "seed": args.seed + env_idx})
                 _ep_return_buf[done_mask] = 0.0
 
@@ -632,6 +639,7 @@ if __name__ == "__main__":
         b_inds = np.arange(args.batch_size)
         clipfracs = []
         update_time = time.time()
+        bc_loss = torch.zeros((), device=device)
         for epoch in range(args.update_epochs):
             np.random.shuffle(b_inds)
             for start in range(0, args.batch_size, args.minibatch_size):
@@ -676,7 +684,13 @@ if __name__ == "__main__":
                     v_loss = 0.5 * ((newvalue - b_returns[mb_inds]) ** 2).mean()
 
                 entropy_loss = entropy.mean()
-                loss = pg_loss - args.ent_coef * entropy_loss + v_loss * args.vf_coef
+                bc_loss = torch.zeros((), device=device)
+                demo_batch = gap_stats.get_top_batch(args.bc_batch_size, device=device)
+                if demo_batch is not None:
+                    bc_pred_actions = agent.get_action(demo_batch["observations"], deterministic=True)
+                    bc_loss = F.mse_loss(bc_pred_actions, demo_batch["actions"])
+
+                loss = pg_loss - args.ent_coef * entropy_loss + v_loss * args.vf_coef + args.bc_coef * bc_loss
 
                 optimizer.zero_grad()
                 loss.backward()
@@ -695,6 +709,7 @@ if __name__ == "__main__":
         logger.add_scalar("charts/learning_rate", optimizer.param_groups[0]["lr"], global_step)
         logger.add_scalar("losses/value_loss", v_loss.item(), global_step)
         logger.add_scalar("losses/policy_loss", pg_loss.item(), global_step)
+        logger.add_scalar("losses/bc_loss", bc_loss.item(), global_step)
         logger.add_scalar("losses/entropy", entropy_loss.item(), global_step)
         logger.add_scalar("losses/old_approx_kl", old_approx_kl.item(), global_step)
         logger.add_scalar("losses/approx_kl", approx_kl.item(), global_step)

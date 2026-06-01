@@ -149,6 +149,9 @@ The **fixed-seed approach** is simpler and directly answers the question: given 
 ### Long-term
 - [ ] (Future) Bi-manual variant: two panda_wristcam arms
 
+### Infrastructure
+- [ ] **SSH compute backend for `launch_xm_slurm.py`** — add a `--cluster ssh --host <user@host>` option that SSHes into an arbitrary machine and runs the Docker job there, so spare local computers can be used as training workers without needing Slurm or GCP.
+
 ---
 
 ---
@@ -164,8 +167,8 @@ Run it in three environments:
 # Local (uses .venv)
 uv run python -m pytest tests/test_push_text.py -v
 
-# Docker — headless, no GPU (mirrors Vertex AI conditions)
-docker run --rm gcr.io/legoassembly/gberseth/maniskill-ppo:latest \
+# Docker — headless, no GPU
+docker run --rm gberseth/maniskill-ppo:latest \
   bash -c "pip install pytest -q --root-user-action=ignore && \
            python -m pytest /app/tests/test_push_text.py -v"
 
