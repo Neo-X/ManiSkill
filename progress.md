@@ -155,10 +155,36 @@ The **fixed-seed approach** is simpler and directly answers the question: given 
 
 ## Docker & GCP Deployment
 
+### Testing
+
+`tests/test_push_text.py` covers simulation correctness, device checks, and a short PPO loop.
+Run it in three environments:
+
+```bash
+# Local (uses .venv)
+uv run python -m pytest tests/test_push_text.py -v
+
+# Docker — headless, no GPU (mirrors Vertex AI conditions)
+docker run --rm gcr.io/legoassembly/gberseth/maniskill-ppo:latest \
+  bash -c "pip install pytest -q --root-user-action=ignore && \
+           python -m pytest /app/tests/test_push_text.py -v"
+
+# GCP Vertex AI smoke job (submits via xmanager, checks wandb for output)
+uv run scripts/launch_xm_slurm.py ppo-smoke --cluster gcp
+```
+
+The Docker test is the key headless gate — if it passes, the GCP job will work.
+Tests include: env creation, episode rollout, fixed/random layout reproducibility,
+device enumeration, and a full ppo.py subprocess run.
+
 ### Docker image: `gberseth/maniskill-ppo:latest`
 - Based on `nvidia/cudagl:11.3.1-devel-ubuntu20.04` (supports GPU via `--gpus all`)
-- Works **CPU-only** (no GPU) via null-render stubs in `mani_skill/envs/sapien_env.py`
-- `render_backend="none"` set automatically when `--no-capture-video` to skip Vulkan init
+- Works **CPU-only** (no GPU) via `_patch_render_material_noop()` in `mani_skill/envs/sapien_env.py`
+- When `render_backend="none"`, SAPIEN's `RenderMaterial` is replaced with a no-op so the URDF
+  loader and task code can construct visual assets without a Vulkan device (visuals are never
+  added to the scene since `can_render()` is False)
+- `render_backend="none"` set automatically when `--no-capture-video`
+- `tests/` baked in at `/app/tests/` (added June 2026)
 - `WORKDIR /app`, `examples/` baked in at `/app/examples/`, `mani_skill/` installed to site-packages
 - Standard run command (no extra mounts needed after May 25 rebuild):
   ```bash
