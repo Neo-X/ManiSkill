@@ -106,24 +106,43 @@ class BufferGapV2():
             #     writer.add_scalar("charts/replay_top_k_returns_stochastic", np.mean(returns), step)
             # print(f"Stochastic Eval Return: {np.mean(returns)} at step {step}")
 
-    def get_top_batch(self, batch_size: int, device=None):
+    def get_top_batch(self, k: int = 4, device=None, use_top_k: bool = False):
         """
-           The goal in this particular GET version is to be able to grab a batch of data.
-           Pull four random plans from the heap and then convert those into vectors and then return that as the batch.
+        Get a batch of plans and convert them into vectors for PPO training.
+        We will need to pad the plans to make them the same length, but we can do that in the collate function of the dataloader.
+        
+        Args:
+            k: Number of plans to retrieve (default: 4)
+            device: Device to place tensors on
+            use_top_k: If True, retrieves the top k plans by return value (deterministic).
+                      If False, samples k random plans (stochastic). Default is False.
+            
+        Returns:
+            Dictionary with:
+            - observations: concatenated observations from selected plans
+            - actions: concatenated actions from selected plans
+            - lengths: list of trajectory lengths for each plan (for padding info)
         """
-
-        if batch_size <= 0 or not self._top_k_plans:
+        if k <= 0 or not self._top_k_plans:
             return None
 
-        # Sample up to 4 random plans from the heap
-        num_plans_to_sample = min(4, len(self._top_k_plans))
-        sampled_indices = np.random.choice(len(self._top_k_plans), size=num_plans_to_sample, replace=False)
+        # Select plans based on mode
+        if use_top_k:
+            # Get the k largest returns from the heap efficiently (without full sort)
+            # heapq.nlargest is optimized for extracting top-k from a heap
+            sorted_plans = heapq.nlargest(k, self._top_k_plans, key=lambda x: x[0])
+            selected_plans = sorted_plans
+        else:
+            # Sample k random plans from the heap (stochastic approach)
+            num_plans_to_sample = min(k, len(self._top_k_plans))
+            sampled_indices = np.random.choice(len(self._top_k_plans), size=num_plans_to_sample, replace=False)
+            selected_plans = [self._top_k_plans[idx] for idx in sampled_indices]
+
+        observations_list = []
+        actions_list = []
+        lengths = []
         
-        observations = []
-        actions = []
-        ## Combine plans into long vectors for PPO training.
-        for idx in sampled_indices:
-            _, _, plan, plan_states = self._top_k_plans[idx]
+        for return_val, _, plan, plan_states in selected_plans:
             if len(plan) == 0 or len(plan_states) == 0:
                 continue
 
@@ -133,19 +152,21 @@ class BufferGapV2():
             if traj_len == 0:
                 continue
 
-            actions.append(plan_array[:traj_len])
-            observations.append(obs_array[:traj_len])
+            observations_list.append(obs_array[:traj_len])
+            actions_list.append(plan_array[:traj_len])
+            lengths.append(traj_len)
 
-        if not observations:
+        if not observations_list:
             return None
 
-        all_observations = np.concatenate(observations, axis=0)
-        all_actions = np.concatenate(actions, axis=0)
+        all_observations = np.concatenate(observations_list, axis=0)
+        all_actions = np.concatenate(actions_list, axis=0)
         target_device = self._device if device is None else device
 
         return {
             "observations": torch.as_tensor(all_observations, dtype=torch.float32, device=target_device),
             "actions": torch.as_tensor(all_actions, dtype=torch.float32, device=target_device),
+            "lengths": lengths,  # For padding in collate function
         }
 
  
@@ -278,6 +299,7 @@ class RecordEpisodeStatisticsV2(gym.Wrapper, gym.utils.RecordConstructorArgs):
 
         self.num_envs = getattr(env, "num_envs", 1)
         self.episode_actions = []
+        self.episode_observations = []
         self.episode_rewards = []
 
     def reset(self, **kwargs):
@@ -285,6 +307,7 @@ class RecordEpisodeStatisticsV2(gym.Wrapper, gym.utils.RecordConstructorArgs):
         obs, info = super().reset(**kwargs)
         self.episode_actions = []
         self.episode_rewards = []
+        self.episode_observations = []
         # self.episode_actions = np.zeros(self.num_envs, dtype=np.float32)
         return obs, info
 
@@ -302,12 +325,14 @@ class RecordEpisodeStatisticsV2(gym.Wrapper, gym.utils.RecordConstructorArgs):
         ), f"`info` dtype is {type(infos)} while supported dtype is `dict`. This may be due to usage of other wrappers in the wrong order."
         self.episode_actions.append(action)
         self.episode_rewards.append(rewards)
+        self.episode_observations.append(observations)
+
         dones = np.logical_or(terminations, truncations)
         num_dones = np.sum(dones)
         if num_dones and "episode" in infos:
             infos["episode"]["actions"] = np.where(dones, self.episode_actions, 0) if isinstance(self.env.action_space, gym.spaces.Discrete) else np.where(dones, self.episode_actions, 0)
             infos["episode"]["rewards"] = np.where(dones, self.episode_rewards, 0)
-            
+            infos["episode"]["observations"] = np.where(dones, self.episode_observations, 0)
             # print( infos["episode"])
             # print("Actions", np.where(dones, self.episode_actions, 0))
         infos['reward']= rewards

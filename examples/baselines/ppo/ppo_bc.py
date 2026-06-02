@@ -128,8 +128,10 @@ class Args:
     """if toggled, letter tiles spawn at fixed positions every episode (no randomization)"""
     bc_coef: float = 0.1
     """weight on the behavior cloning loss from top-return trajectories"""
-    bc_batch_size: int = 256
-    """number of observation-action pairs sampled from the return buffer per optimizer step"""
+    bc_batch_size: int = 4
+    """number of observation-action pairs sampled from the return buffer per optimizer step.
+    Note: this is in addition to the PPO batch size, so the effective batch size is (ppo_minibatch_size + bc_batch_size)
+    Increasing thie number will slow down training because this causes a type of prioritized experience replay"""
 
 
     # to be filled in runtime
@@ -570,7 +572,9 @@ if __name__ == "__main__":
             if done_mask.any():
                 for env_idx in done_mask.nonzero(as_tuple=False).flatten().tolist():
                     gap_stats.add({"r": _ep_return_buf[env_idx].item(),
-                                   "actions": [], "rewards": [], "observations": [],
+                                   "actions": infos["episode"]["actions"][env_idx] if "actions" in infos["episode"] else None, 
+                                   "rewards": infos["episode"]["rewards"][env_idx] if "rewards" in infos["episode"] else None,
+                                   "observations": infos["episode"]["observations"][env_idx] if "observations" in infos["episode"] else None,
                                    "seed": args.seed + env_idx})
                 _ep_return_buf[done_mask] = 0.0
 
@@ -685,7 +689,7 @@ if __name__ == "__main__":
 
                 entropy_loss = entropy.mean()
                 bc_loss = torch.zeros((), device=device)
-                demo_batch = gap_stats.get_top_batch(args.bc_batch_size, device=device)
+                demo_batch = gap_stats.get_top_batch(args.bc_batch_size, device=device, use_top_k=True)
                 if demo_batch is not None:
                     bc_pred_actions = agent.get_action(demo_batch["observations"], deterministic=True)
                     bc_loss = F.mse_loss(bc_pred_actions, demo_batch["actions"])
