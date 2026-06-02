@@ -125,6 +125,8 @@ class Args:
     """log gap metrics every this many PPO iterations"""
     fixed_layout: bool = False
     """if toggled, letter tiles spawn at fixed positions every episode (no randomization)"""
+    sim_backend: str = "physx_cpu"
+    """simulation backend: 'physx_cpu' for CPU sim, 'gpu' for GPU-parallelized sim"""
 
 
     # to be filled in runtime
@@ -219,12 +221,15 @@ if __name__ == "__main__":
     # env setup — training/eval envs never render; video capture uses a separate on-demand env
     # During --evaluate mode, rendering is always enabled for trajectory saving
     render_mode = "rgb_array" if (args.capture_video and args.evaluate) else None
-    render_backend = "gpu" if (args.capture_video and args.evaluate) else "none"
-    env_kwargs: dict[str, object] = dict(obs_mode="state", render_mode=render_mode, render_backend=render_backend, sim_backend="physx_cpu")
+    if args.sim_backend == "gpu":
+        render_backend = "gpu"  # GPU sim requires Vulkan renderer
+    else:
+        render_backend = "gpu" if (args.capture_video and args.evaluate) else "none"
+    env_kwargs: dict[str, object] = dict(obs_mode="state", render_mode=render_mode, render_backend=render_backend, sim_backend=args.sim_backend)
     if args.fixed_layout:
         env_kwargs["fixed_layout"] = True
     # Separate kwargs for on-demand video capture (always GPU-rendered)
-    video_env_kwargs: dict[str, object] = dict(obs_mode="state", render_mode="rgb_array", render_backend="gpu", sim_backend="physx_cpu")
+    video_env_kwargs: dict[str, object] = dict(obs_mode="state", render_mode="rgb_array", render_backend="gpu", sim_backend=args.sim_backend)
     if args.fixed_layout:
         video_env_kwargs["fixed_layout"] = True
     if args.control_mode is not None:

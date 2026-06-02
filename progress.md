@@ -133,6 +133,66 @@ To use `BufferGapV2` as intended (measuring whether high-return trajectories exi
 
 The **fixed-seed approach** is simpler and directly answers the question: given a fixed goal configuration, does the agent ever stumble upon a near-successful trajectory (exploration), and if so, does PPO learn to reproduce it (exploitation)?
 
+### Experiment 4 — PPO-BC imitation quality check (2026-06-01)
+- **Run:** `ppo_bc.py` (async vector env)
+- **Observation:** Adding imitation from buffered high-return trajectories is currently **not improving performance**.
+- **Primary concern:** Need to confirm `eval_deterministic()` is correctly evaluating policy quality, and whether copying the highest-value trajectory is reproducible enough to produce stable quality gains.
+
+#### Immediate verification notes
+- [ ] Validate `eval_deterministic()` correctness end-to-end:
+  use a known fixed seed and replay both (a) current policy deterministic actions and (b) stored best-trajectory actions; confirm returns match expected rollout behavior.
+- [ ] Verify reproducibility for highest-return trajectory replay:
+  same trajectory + same initial seed should produce consistent returns across repeated runs.
+- [ ] Compare PPO-BC against PPO baseline on identical fixed-layout/fixed-seed settings:
+  if imitation is working, deterministic eval return and success should improve earlier than baseline.
+- [ ] Track imitation utility directly:
+  log and monitor BC loss alongside deterministic return from replayed top trajectory to detect whether cloning signal is meaningful.
+- [ ] Gate conclusions on deterministic diagnostics first:
+  if deterministic replay is not reproducible, imitation quality measurements are unreliable and must be fixed before further reward/model tuning.
+
+## PushT-v1 Baseline Experiments
+
+### Goal
+Replicate the known-good ManiSkill PPO result on PushT-v1 before attempting push-text.
+Confirmed PushT-v1 runs at ~232 SPS with 64 envs on Lightning AI (NVIDIA L4).
+
+### Setup — Lightning AI (GPU)
+- SSH: `s_01kszc7wvb2vcm5dnpq75f8ds7@ssh.lightning.ai`
+- Workspace: `/teamspace/studios/this_studio/ManiSkill`
+- GPU: NVIDIA L4, 23 GB VRAM, CUDA 13.0
+- Code installed via `git clone https://github.com/Neo-X/ManiSkill.git` + `uv venv --python 3.11 && uv pip install -e .`
+- Use `scp` to copy files to remote when testing — **do not commit until confirmed working**
+- Run training: `uv run python ppo_upstream.py --env_id='PushT-v1' ...` (from `examples/baselines/ppo/`)
+
+### Known-good settings (from baselines.sh)
+```bash
+uv run python ppo_upstream.py \
+  --env_id="PushT-v1" \
+  --num_envs=4096 --num-steps=16 \
+  --update_epochs=8 --num_minibatches=32 \
+  --gamma=0.99 --total_timesteps=50_000_000 \
+  --num_eval_steps=100 --num_eval_envs=16 \
+  --no-capture-video
+```
+
+### Status
+- [x] GPU instance running and code installed
+- [x] Smoke test (64 envs, 2000 steps) passes — 232 SPS
+- [ ] Full 50M step run to verify >80% success rate
+- [ ] Transfer successful hyperparameters to push-text
+
+### TODO: Merge upstream ppo.py changes into our ppo.py
+Our `ppo.py` was based on the upstream but diverged significantly (added buffer_gap,
+wandb tracking, fixed_layout, async CPU path, etc.). The upstream version at commit
+`b2cc4334ae5c6162ecddb9fe78465d2ef2911028` uses `sim_backend="physx_cuda"` and works
+natively on GPU. Merge strategy when ready:
+- Start from upstream version (physx_cuda, no CPUGymWrapper)
+- Add `--sim-backend` arg to support CPU fallback
+- Re-add buffer_gap, fixed_layout, async path on top
+- Test CPU and GPU paths before committing
+
+---
+
 ## PushText Environment — Planned Improvements
 
 ### Short-term
