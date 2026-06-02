@@ -48,11 +48,10 @@ class WhiteTableSceneBuilder(TableSceneBuilder):
         super().build()
         # cheap way to un-texture table
         for part in self.table._objs:
-            for triangle in (
-                part.find_component_by_type(sapien.render.RenderBodyComponent)
-                .render_shapes[0]
-                .parts
-            ):
+            render_body = part.find_component_by_type(sapien.render.RenderBodyComponent)
+            if render_body is None or not render_body.render_shapes:
+                continue
+            for triangle in render_body.render_shapes[0].parts:
                 triangle.material.set_base_color(np.array([255, 255, 255, 255]) / 255)
                 triangle.material.set_base_color_texture(None)
                 triangle.material.set_normal_texture(None)
