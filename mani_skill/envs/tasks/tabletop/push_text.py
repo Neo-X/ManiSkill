@@ -48,7 +48,7 @@ SPAWN_BOUNDS = [[-0.05, -0.20], [0.15, 0.20]]
 FIXED_SPAWN_CENTER_X = 0.08
 
 # Success / reward thresholds
-PLACE_THRESH = 0.025   # letter xy distance to target for "placed"
+PLACE_THRESH = 0.125   # letter xy distance to target for "placed"
 MAX_LETTERS = 6        # cap word length so tiles fit on table
 
 
@@ -87,7 +87,7 @@ def _build_letter(scene, letter: str, name: str, color: List[float], kinematic: 
     return builder.build(name=name)
 
 
-@register_env("PushText-v1", max_episode_steps=200)
+@register_env("PushText-v1", max_episode_steps=100)
 class PushTextEnv(BaseEnv):
     """
     **Task Description:**

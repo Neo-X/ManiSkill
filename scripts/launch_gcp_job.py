@@ -92,9 +92,9 @@ JOBS = {
             "python /app/examples/baselines/ppo/ppo_upstream.py"
             " --track --wandb-project-name ManiSkill --wandb-entity real-lab"
             " --env_id PushText-v1"
-            " --num_envs 256 --no-capture-video"
+            " --num_envs 1024 --no-capture-video"
             " --num-eval-envs 4 --num-steps 50 --num_eval_steps 100"
-            " --total_timesteps 5000"
+            " --total_timesteps 500000"
             " --exp-name gcp-t4-ppo-test"
         ),
         machine_type="n1-standard-8",
@@ -108,10 +108,10 @@ JOBS = {
             "python /app/examples/baselines/ppo/ppo_upstream.py"
             " --track --wandb-project-name ManiSkill --wandb-entity real-lab"
             " --env_id PushText-v1"
-            " --num_envs 1024 --no-capture-video"
-            " --num-eval-envs 8 --num-steps 50 --num_eval_steps 200"
+            " --num_envs 4096 --no-capture-video"
+            " --num-eval-envs 16 --num-steps 16 --num_eval_steps 100"
             " --update_epochs 8 --num_minibatches 32"
-            " --gamma 0.95 --total_timesteps 100000000"
+            " --gamma 0.8 --total_timesteps 100000000"
             " --exp-name push-text-v1-t4-100M"
         ),
         machine_type="n1-standard-8",
@@ -155,11 +155,13 @@ def make_startup_script(
 
     if use_gpu:
         # NGC VMI has NVIDIA drivers, Docker, and nvidia-container-toolkit pre-installed.
-        # Just wait for Docker to be ready before running.
-        setup_block = textwrap.dedent("""\
+        # Pull image explicitly with retries before running to avoid unexpected EOF on large images.
+        setup_block = textwrap.dedent(f"""\
             echo "=== Waiting for Docker to be ready ==="
             timeout 120 bash -c 'until docker info &>/dev/null; do sleep 3; done'
             nvidia-smi
+            echo "=== Pulling image (with retries) ==="
+            for i in 1 2 3; do docker pull {docker_image} && break; echo "Pull attempt $i failed, retrying in 30s..."; sleep 30; done
         """)
     elif install_docker:
         setup_block = textwrap.dedent("""\
