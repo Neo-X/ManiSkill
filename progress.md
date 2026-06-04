@@ -177,9 +177,44 @@ uv run python ppo_upstream.py \
 
 ### Status
 - [x] GPU instance running and code installed
-- [x] Smoke test (64 envs, 2000 steps) passes — 232 SPS
-- [ ] Full 50M step run to verify >80% success rate
+- [x] Smoke test (64 envs, 2000 steps) passes — 232 SPS (~1000 SPS)
+- [x] Full 50M step run confirmed working — **17,000 SPS** with 4096 envs on L4; `eval_success_once > 0` observed after ~20M steps
+- [x] Killed after success confirmed at ~20M steps — no need to run to 50M
 - [ ] Transfer successful hyperparameters to push-text
+
+## StackCube-v1 Baseline Experiments
+
+### Goal
+StackCube-v1 is a pick-and-place task (same robot + gripper as push-text) — a closer proxy
+than PushT. Replicating PPO success here validates the GPU training pipeline for
+manipulation tasks before applying it to push-text.
+
+### Known-good settings (from baselines.sh)
+```bash
+/teamspace/studios/this_studio/ManiSkill/.venv/bin/python ppo_upstream.py \
+  --env_id="StackCube-v1" \
+  --num_envs=4096 --num-steps=16 \
+  --update_epochs=8 --num_minibatches=32 \
+  --total_timesteps=50_000_000 \
+  --num_eval_envs=16 \
+  --no-capture-video \
+  --track \
+  --wandb-project-name ManiSkill \
+  --wandb-entity real-lab \
+  --exp-name stack-cube-v1-gpu-l4
+```
+Run from: `/teamspace/studios/this_studio/ManiSkill/examples/baselines/ppo/`
+
+### Results
+- **~100M steps to reach ~60% success rate** on L4 GPU with 4096 envs
+- At 17,000 SPS this is ~100 minutes of wall time
+- 60% is the practical ceiling observed — not 80-90% as the official benchmark claims at 50M steps (may require more tuning or longer runs)
+
+### Baseline for push-text
+**100M samples / ~60% success** is the reference point. Push-text should be evaluated against this bar:
+- If push-text reaches 60% success within ~100M samples, it is on par with StackCube
+- If it needs significantly more, the task is harder or the reward/observation needs improvement
+- Total timesteps for push-text full runs: set to **100M** to match this baseline
 
 ### TODO: Merge upstream ppo.py changes into our ppo.py
 Our `ppo.py` was based on the upstream but diverged significantly (added buffer_gap,
@@ -286,8 +321,22 @@ One-time GCP setup (already done):
 - All GCP jobs use **SPOT** provisioning (patched into `aiplatform.CustomJob.submit`)
 - All jobs capped at **8 CPUs / 16 GiB RAM**
 
-### GCP spot instance launcher: `scripts/launch_gcp_job.py` ← legacy, prefer launch_xm_slurm.py
-- Uses Debian 12 + installs Docker at startup
+### GCP T4 GPU training: `scripts/launch_gcp_job.py` (GPU jobs)
+- Jobs: `ppo-test-t4` (smoke, 5K steps) and `ppo-training-t4` (100M steps, PushText-v1)
+- Uses **NGC VMI** image (`nvidia-gpu-cloud-vmi-base-2025-9-1-x86-64`, project `nvidia-ngc-public`) — has Docker + CUDA + nvidia-container-toolkit pre-installed. No manual driver or Docker install needed.
+- Machine: `n1-standard-8` + T4 GPU (`nvidia-tesla-t4`), SPOT provisioning, `us-central1-a`
+- Runs `ppo_upstream.py` with `physx_cuda` (GPU-parallelized sim), `docker run --gpus all`
+- Self-deletes instance on job completion via `trap self_delete EXIT`
+- Launch: `uv run scripts/launch_gcp_job.py ppo-training-t4 --zone us-central1-a`
+- Smoke test: `uv run scripts/launch_gcp_job.py ppo-test-t4 --zone us-central1-a`
+
+#### GCP T4 setup history (June 2026)
+- GCP Deep Learning VM (`deeplearning-platform-release/common-cu129-ubuntu-2204-nvidia-580`) has CUDA but NOT Docker — abandoned
+- NGC VMI (`nvidia-ngc-public/nvidia-gpu-cloud-vmi-base-2025-9-1-x86-64`) has Docker + CUDA pre-installed — **use this**
+- T4 GPUs not available in `northamerica-northeast1-a` — use `us-central1-a`
+
+### GCP spot instance launcher: `scripts/launch_gcp_job.py` ← legacy CPU jobs, prefer launch_xm_slurm.py
+- CPU jobs use Debian 12 + installs Docker at startup
 - Self-deletes instance on job completion or crash via `trap self_delete EXIT`
 - Requires `roles/compute.instanceAdmin.v1` on the default compute SA (one-time setup):
   ```bash

@@ -493,8 +493,8 @@ class PushTextEnv(BaseEnv):
             angle_diff = torch.abs(direction_of_tile_to_target - tile_velocity_direction)
             angle_diff = torch.where(angle_diff > np.pi, 2 * np.pi - angle_diff, angle_diff)  # wrap to [0, π]
             direction_rew = 1.0 - angle_diff / np.pi  # (b,), 1.0 when perfectly aligned, 0.0 when moving perpendicular or away
-            # place_rew = 1 - torch.tanh(5.0 * dists[:, i])
-            letter_rew = torch.where(is_grasped[:, i], 4 + direction_rew, letter_rew)
+            place_rew = 1 - torch.tanh(5.0 * dists[:, i])
+            letter_rew = torch.where(is_grasped[:, i], 4 + place_rew, letter_rew)
 
             # Stage 2: placed — reward for releasing and becoming static
             ungrasp_rew = (

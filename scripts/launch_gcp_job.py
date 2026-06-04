@@ -9,8 +9,10 @@ Launch a Docker job on a GCP spot instance that self-deletes when done.
 Usage:
     uv run scripts/launch_gcp_job.py --help
     uv run scripts/launch_gcp_job.py hello-world
-    uv run scripts/launch_gcp_job.py ppo-test      # 5K steps, verifies wandb
-    uv run scripts/launch_gcp_job.py ppo-training  # full 10M step run
+    uv run scripts/launch_gcp_job.py ppo-test           # 5K steps, CPU, verifies wandb
+    uv run scripts/launch_gcp_job.py ppo-training       # full 10M step CPU run
+    uv run scripts/launch_gcp_job.py ppo-test-t4        # smoke test on T4 GPU
+    uv run scripts/launch_gcp_job.py ppo-training-t4    # full 100M step T4 GPU run
     uv run scripts/launch_gcp_job.py ppo-training --gcs-bucket my-bucket
 """
 
@@ -40,6 +42,7 @@ JOBS = {
         machine_type="e2-micro",
         use_wandb=False,
     ),
+    # --- CPU jobs (COS or Debian, no GPU) ---
     "ppo-test": dict(
         image="gberseth/maniskill-ppo:latest",
         cmd=(
@@ -81,11 +84,46 @@ JOBS = {
         machine_type="e2-standard-32",
         use_wandb=True,
     ),
+    # --- GPU jobs (Deep Learning VM, T4, physx_cuda) ---
+    # DL VM image has Docker + CUDA + nvidia-container-toolkit pre-installed.
+    "ppo-test-t4": dict(
+        image="gberseth/maniskill-ppo:latest",
+        cmd=(
+            "python /app/examples/baselines/ppo/ppo_upstream.py"
+            " --track --wandb-project-name ManiSkill --wandb-entity real-lab"
+            " --env_id PushText-v1"
+            " --num_envs 256 --no-capture-video"
+            " --num-eval-envs 4 --num-steps 50 --num_eval_steps 100"
+            " --total_timesteps 5000"
+            " --exp-name gcp-t4-ppo-test"
+        ),
+        machine_type="n1-standard-8",
+        gpu_type="nvidia-tesla-t4",
+        gpu_count=1,
+        use_wandb=True,
+    ),
+    "ppo-training-t4": dict(
+        image="gberseth/maniskill-ppo:latest",
+        cmd=(
+            "python /app/examples/baselines/ppo/ppo_upstream.py"
+            " --track --wandb-project-name ManiSkill --wandb-entity real-lab"
+            " --env_id PushText-v1"
+            " --num_envs 1024 --no-capture-video"
+            " --num-eval-envs 8 --num-steps 50 --num_eval_steps 200"
+            " --update_epochs 8 --num_minibatches 32"
+            " --gamma 0.95 --total_timesteps 100000000"
+            " --exp-name push-text-v1-t4-100M"
+        ),
+        machine_type="n1-standard-8",
+        gpu_type="nvidia-tesla-t4",
+        gpu_count=1,
+        use_wandb=True,
+    ),
 }
 
 
 # ---------------------------------------------------------------------------
-# Startup script template
+# Startup script templates
 # ---------------------------------------------------------------------------
 
 def make_startup_script(
@@ -96,6 +134,7 @@ def make_startup_script(
     install_docker: bool = True,
     runs_dir: str = "/var/runs",
     capture_video: bool = False,
+    use_gpu: bool = False,
 ) -> str:
     sync_block = ""
     if gcs_bucket:
@@ -106,17 +145,30 @@ def make_startup_script(
     # xvfb-run provides a virtual display required by sapien_cpu renderer
     xvfb_prefix = "xvfb-run -a " if capture_video else ""
 
+    gpu_flags = "--gpus all " if use_gpu else ""
+
     run_cmd = (
-        f"docker run --rm -w /app -v {runs_dir}:/app/runs "
+        f"docker run {gpu_flags}--rm -w /app -v {runs_dir}:/app/runs "
         f"{wandb_env} "
         f"{docker_image} {xvfb_prefix}{docker_cmd}"
     )
 
-    docker_install_block = textwrap.dedent("""\
-        echo "=== Installing Docker ==="
-        curl -fsSL https://get.docker.com | sh
-        systemctl enable --now docker
-    """) if install_docker else ""
+    if use_gpu:
+        # NGC VMI has NVIDIA drivers, Docker, and nvidia-container-toolkit pre-installed.
+        # Just wait for Docker to be ready before running.
+        setup_block = textwrap.dedent("""\
+            echo "=== Waiting for Docker to be ready ==="
+            timeout 120 bash -c 'until docker info &>/dev/null; do sleep 3; done'
+            nvidia-smi
+        """)
+    elif install_docker:
+        setup_block = textwrap.dedent("""\
+            echo "=== Installing Docker ==="
+            curl -fsSL https://get.docker.com | sh
+            systemctl enable --now docker
+        """)
+    else:
+        setup_block = ""
 
     return textwrap.dedent(f"""\
         #!/bin/bash
@@ -139,7 +191,7 @@ def make_startup_script(
         }}
         trap self_delete EXIT
 
-        {docker_install_block}
+        {setup_block}
         echo "=== Docker ready ===" && docker info
 
         mkdir -p {runs_dir}
@@ -186,6 +238,7 @@ def launch(
     capture_video: bool = False,
 ) -> None:
     job = JOBS[job_name]
+    use_gpu = bool(job.get("gpu_type"))
 
     if job.get("use_wandb") and wandb_key is None:
         wandb_key = get_wandb_key()
@@ -206,9 +259,10 @@ def launch(
         docker_cmd=docker_cmd,
         gcs_bucket=gcs_bucket,
         wandb_key=wandb_key if job.get("use_wandb") else None,
-        install_docker=not use_cos,
+        install_docker=not use_cos and not use_gpu,
         runs_dir="/var/runs",
         capture_video=capture_video,
+        use_gpu=use_gpu,
     )
 
     # Write startup script to a temp file to avoid gcloud metadata parsing issues
@@ -216,10 +270,23 @@ def launch(
         f.write(startup_script)
         script_path = f.name
 
-    if use_cos:
+    if use_gpu:
+        # Deep Learning VM: pre-installed CUDA + Docker + nvidia-container-toolkit.
+        # GPU instances require TERMINATE maintenance policy (no live migration).
+        image_args = [
+            "--image=nvidia-gpu-cloud-vmi-base-2025-9-1-x86-64",
+            "--image-project=nvidia-ngc-public",
+        ]
+        accelerator_args = [
+            f"--accelerator=type={job['gpu_type']},count={job.get('gpu_count', 1)}",
+            "--maintenance-policy=TERMINATE",
+        ]
+    elif use_cos:
         image_args = ["--image-family=cos-stable", "--image-project=cos-cloud"]
+        accelerator_args = []
     else:
         image_args = ["--image-family=debian-12", "--image-project=debian-cloud"]
+        accelerator_args = []
 
     provisioning = ["--provisioning-model=SPOT", "--instance-termination-action=DELETE"] if spot else []
     cmd = [
@@ -227,6 +294,7 @@ def launch(
         f"--zone={zone}",
         f"--machine-type={job['machine_type']}",
         *provisioning,
+        *accelerator_args,
         *image_args,
         "--boot-disk-size=200GB",
         f"--metadata-from-file=startup-script={script_path}",
@@ -268,11 +336,11 @@ def main() -> None:
     parser.add_argument("--no-spot", action="store_true",
                         help="Use on-demand pricing instead of spot (more reliable, more expensive)")
     parser.add_argument("--no-cos", action="store_true",
-                        help="Use Debian instead of Container-Optimized OS (installs Docker at boot)")
+                        help="Use Debian instead of Container-Optimized OS (CPU jobs only)")
     parser.add_argument("--dry-run", action="store_true",
                         help="Print the gcloud command without launching")
     parser.add_argument("--capture-video", action="store_true",
-                        help="Record eval videos via xvfb + sapien_cpu renderer (rebuilds without --no-capture-video)")
+                        help="Record eval videos via xvfb + sapien_cpu renderer")
     args = parser.parse_args()
 
     instance_name = args.instance_name or f"{args.job}-instance"
