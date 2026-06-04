@@ -47,7 +47,7 @@ JOBS = {
         image="gberseth/maniskill-ppo:latest",
         cmd=(
             "python /app/examples/baselines/ppo/ppo.py"
-            " --track --wandb-project-name ManiSkill --wandb-entity real-lab"
+            " --track --wandb-project-name ManiSkill --wandb-entity unsupervised-robotics"
             " --use-async-vector-env --num-envs 32 --no-capture-video"
             " --num-eval-envs 4 --num-steps 50 --num-eval-steps 100"
             " --total-timesteps 100000 --eval-freq 10"
@@ -60,7 +60,7 @@ JOBS = {
         image="gberseth/maniskill-ppo:latest",
         cmd=(
             "python /app/examples/baselines/ppo/ppo.py"
-            " --track --wandb-project-name ManiSkill --wandb-entity real-lab"
+            " --track --wandb-project-name ManiSkill --wandb-entity unsupervised-robotics"
             " --use-async-vector-env --num-envs 32 --no-capture-video"
             " --num-eval-envs 4 --num-steps 50 --num-eval-steps 200"
             " --total-timesteps 10000000 --eval-freq 125"
@@ -74,7 +74,7 @@ JOBS = {
         image="gberseth/maniskill-ppo:latest",
         cmd=(
             "python /app/examples/baselines/ppo/ppo.py"
-            " --track --wandb-project-name ManiSkill --wandb-entity real-lab"
+            " --track --wandb-project-name ManiSkill --wandb-entity unsupervised-robotics"
             " --use-async-vector-env --num-envs 32 --no-capture-video"
             " --num-eval-envs 4 --num-steps 50 --num-eval-steps 200"
             " --total-timesteps 1000000 --eval-freq 25"
@@ -90,7 +90,7 @@ JOBS = {
         image="gberseth/maniskill-ppo:latest",
         cmd=(
             "python /app/examples/baselines/ppo/ppo_upstream.py"
-            " --track --wandb-project-name ManiSkill --wandb-entity real-lab"
+            " --track --wandb-project-name ManiSkill --wandb-entity unsupervised-robotics"
             " --env_id PushText-v1"
             " --num_envs 1024 --no-capture-video"
             " --num-eval-envs 4 --num-steps 50 --num_eval_steps 100"
@@ -106,9 +106,9 @@ JOBS = {
         image="gberseth/maniskill-ppo:latest",
         cmd=(
             "python /app/examples/baselines/ppo/ppo_upstream.py"
-            " --track --wandb-project-name ManiSkill --wandb-entity real-lab"
+            " --track --wandb-project-name ManiSkill --wandb-entity unsupervised-robotics"
             " --env_id PushText-v1"
-            " --num_envs 4096 --no-capture-video"
+            " --num_envs 2048 --no-capture-video"
             " --num-eval-envs 16 --num-steps 16 --num_eval_steps 100"
             " --update_epochs 8 --num_minibatches 32"
             " --gamma 0.8 --total_timesteps 100000000"
@@ -140,7 +140,7 @@ def make_startup_script(
     if gcs_bucket:
         sync_block = f"gsutil -m rsync -r {runs_dir} gs://{gcs_bucket}/runs || true"
 
-    wandb_env = f"-e WANDB_API_KEY={wandb_key}" if wandb_key else ""
+    wandb_env = f"-e WANDB_API_KEY={wandb_key} -e WANDB_ENTITY=unsupervised-robotics" if wandb_key else ""
 
     # xvfb-run provides a virtual display required by sapien_cpu renderer
     xvfb_prefix = "xvfb-run -a " if capture_video else ""

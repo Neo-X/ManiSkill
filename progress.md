@@ -96,8 +96,12 @@ The robot must pick up and place fridge-magnet-style letter tiles on a white tab
 - [ ] RLinf AMD image (`rlinf/rlinf:agentic-rlinf0.2-libero-rocm6.4`) also fails Vulkan init (gfx1151 + SAPIEN 3.0.1 `ErrorInitializationFailed`). Use `.venv` locally; RLinf image is suitable for NVIDIA GCP instances only
 - [x] Spot instance confirmed working in northamerica-northeast1-a — 100k step ppo-test run logged to wandb
 - [x] 1M step PPO run started locally (wandb: `real-lab/ManiSkill`, run `push-text-1M`, ~687 SPS on 32 envs)
-- [ ] Full training run (10M steps) on GCP spot instance
-- [ ] Evaluate success rate after full training
+- [x] GCP T4 GPU training pipeline working — NGC VMI image (`nvidia-ngc-public/nvidia-gpu-cloud-vmi-base-2025-9-1-x86-64`) has Docker + CUDA + nvidia-container-toolkit pre-installed; pull retries handle network drops on large image; `us-central1-a` zone
+- [x] StackCube-v1 baseline confirmed: **62.5% success at ~100M steps**, 21k SPS on L4 (wandb: `real-lab/ManiSkill/runs/f5ykh6ui`)
+- [x] PushText-v1 episode length changed to 100 (was 200); Docker image rebuilt and pushed (June 2026)
+- [x] Full 100M step PushText-v1 run launched on GCP T4 (`push-text-t4-ep100`, `push-text-v1-t4-100M`) with StackCube-matching settings: 4096 envs, num_steps=16, gamma=0.8, num_eval_steps=100
+- [ ] Evaluate success rate after full training vs StackCube baseline (62.5%)
+- [x] **Configure `launch.py` for GCP GPU jobs** — Added `--cluster vertex` backend using `xm.Dockerfile` + `xm_local.Vertex`. Builds from `docker/Dockerfile` (project root as context), pushes to GCR, and submits to Vertex AI — local code changes are included automatically, no manual `docker build && push` required. GPU jobs use `xm.JobRequirements(t4=1)`. See `scripts/launch.py`.
 
 ## Training Experiments
 
@@ -245,7 +249,7 @@ natively on GPU. Merge strategy when ready:
 - [ ] (Future) Bi-manual variant: two panda_wristcam arms
 
 ### Infrastructure
-- [ ] **SSH compute backend for `launch_xm_slurm.py`** — add a `--cluster ssh --host <user@host>` option that SSHes into an arbitrary machine and runs the Docker job there, so spare local computers can be used as training workers without needing Slurm or GCP.
+- [ ] **SSH compute backend for `launch.py`** — add a `--cluster ssh --host <user@host>` option that SSHes into an arbitrary machine and runs the Docker job there, so spare local computers can be used as training workers without needing Slurm or GCP.
 
 ---
 
@@ -268,7 +272,7 @@ docker run --rm gberseth/maniskill-ppo:latest \
            python -m pytest /app/tests/test_push_text.py -v"
 
 # GCP Vertex AI smoke job (submits via xmanager, checks wandb for output)
-uv run scripts/launch_xm_slurm.py ppo-smoke --cluster gcp
+uv run scripts/launch.py ppo-smoke --cluster gcp
 ```
 
 The Docker test is the key headless gate — if it passes, the GCP job will work.
@@ -296,30 +300,49 @@ device enumeration, and a full ppo.py subprocess run.
   ```
 - GCP interactive debug: launch `ppo-debug` (n1-standard-8, COS, northamerica-northeast1-a), SSH via IAP, run docker manually to see errors live
 
-### Unified launcher: `scripts/launch_xm_slurm.py` ← **use this for all remote jobs**
+### Unified launcher: `scripts/launch.py` ← **use this for all remote jobs**
 
-XManager-based launcher supporting GCP Vertex AI and Slurm clusters from a single script.
+Single launcher covering xmanager (Vertex AI) and xm-slurm (Mila, DRAC).
 All new experiments should be launched through this script rather than the older `launch_gcp_job.py`.
 
 ```bash
-# GCP Vertex AI (spot, 8 CPUs)
-uv run scripts/launch_xm_slurm.py ppo-fixed-layout --cluster gcp
-uv run scripts/launch_xm_slurm.py ppo-training     --cluster gcp
+# GCP Vertex AI — CPU job (builds from docker/Dockerfile, pushes to GCR, submits)
+uv run python scripts/launch.py ppo-training --cluster vertex
+
+# GCP Vertex AI — T4 GPU job (xm.JobRequirements(t4=1))
+uv run python scripts/launch.py ppo-training-t4 --cluster vertex
+
+# GCP Compute Engine spot VM (CPU only, legacy path — self-deletes on completion)
+uv run python scripts/launch.py ppo-fixed-layout --cluster gcp
 
 # Mila Slurm cluster
-uv run scripts/launch_xm_slurm.py ppo-fixed-layout --cluster mila --user <username>
+uv run python scripts/launch.py ppo-fixed-layout --cluster mila --user <username>
 
 # DRAC / ComputeCanada
-uv run scripts/launch_xm_slurm.py ppo-fixed-layout --cluster drac --user <username>
+uv run python scripts/launch.py ppo-fixed-layout --cluster drac --user <username>
+
+# Dry-run (shows what would be launched without executing)
+uv run python scripts/launch.py ppo-training-t4 --cluster vertex --dry-run
 ```
 
+#### How `--cluster vertex` works (xmanager + Dockerfile)
+1. `xm.Dockerfile(path=".", dockerfile="docker/Dockerfile")` — uses the project root as Docker build context; `COPY mani_skill/` and `COPY examples/` in the Dockerfile pick up current local code automatically
+2. `experiment.package(...)` — builds the image and pushes it to GCR (`gcr.io/legoassembly/...`)
+3. `xm_local.Vertex(requirements=xm.JobRequirements(t4=1))` — submits to Vertex AI with the specified GPU
+4. No separate `docker build && docker push` needed — local code changes go in automatically
+
+#### GPU resource types (xm.JobRequirements kwargs)
+| kwarg | GPU |
+|-------|-----|
+| `t4=1` | NVIDIA Tesla T4 (16 GB) |
+| `v100=1` | NVIDIA Tesla V100 |
+| `a100=1` | NVIDIA A100 (40 GB) |
+| `l4_24th=1` | NVIDIA L4 (24 GB) |
+
 One-time GCP setup (already done):
-- GCS staging bucket: `gs://legoassembly-xmanager`
 - Vertex AI API enabled on project `legoassembly`
-- Service account `xmanager@legoassembly.iam.gserviceaccount.com` with `roles/aiplatform.user`, `roles/storage.objectAdmin`, `roles/logging.logWriter`
-- Docker image mirrored to `gcr.io/legoassembly/gberseth/maniskill-ppo:latest` (xmanager pushes automatically)
-- All GCP jobs use **SPOT** provisioning (patched into `aiplatform.CustomJob.submit`)
-- All jobs capped at **8 CPUs / 16 GiB RAM**
+- Service account with `roles/aiplatform.user`, `roles/storage.objectAdmin`, `roles/logging.logWriter`
+- GCR repository on project `legoassembly` (images pushed automatically by xmanager)
 
 ### GCP T4 GPU training: `scripts/launch_gcp_job.py` (GPU jobs)
 - Jobs: `ppo-test-t4` (smoke, 5K steps) and `ppo-training-t4` (100M steps, PushText-v1)
@@ -335,7 +358,7 @@ One-time GCP setup (already done):
 - NGC VMI (`nvidia-ngc-public/nvidia-gpu-cloud-vmi-base-2025-9-1-x86-64`) has Docker + CUDA pre-installed — **use this**
 - T4 GPUs not available in `northamerica-northeast1-a` — use `us-central1-a`
 
-### GCP spot instance launcher: `scripts/launch_gcp_job.py` ← legacy CPU jobs, prefer launch_xm_slurm.py
+### GCP spot instance launcher: `scripts/launch_gcp_job.py` ← legacy CPU jobs, prefer launch.py
 - CPU jobs use Debian 12 + installs Docker at startup
 - Self-deletes instance on job completion or crash via `trap self_delete EXIT`
 - Requires `roles/compute.instanceAdmin.v1` on the default compute SA (one-time setup):
