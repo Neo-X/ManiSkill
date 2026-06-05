@@ -102,6 +102,8 @@ The robot must pick up and place fridge-magnet-style letter tiles on a white tab
 - [x] Full 100M step PushText-v1 run launched on GCP T4 (`push-text-t4-ep100`, `push-text-v1-t4-100M`) with StackCube-matching settings: 4096 envs, num_steps=16, gamma=0.8, num_eval_steps=100
 - [ ] Evaluate success rate after full training vs StackCube baseline (62.5%)
 - [x] **Configure `launch.py` for GCP GPU jobs** — Added `--cluster vertex` backend using `xm.Dockerfile` + `xm_local.Vertex`. Builds from `docker/Dockerfile` (project root as context), pushes to GCR, and submits to Vertex AI — local code changes are included automatically, no manual `docker build && push` required. GPU jobs use `xm.JobRequirements(t4=1)`. See `scripts/launch.py`.
+- [x] **XManager Vertex AI pipeline confirmed working** — `scripts/xm_hello_world.py` hello-world job ran and reached `JOB_STATE_SUCCEEDED`; L4 training job (`push-text-v1-l4-100M`) submitted and logging to wandb `unsupervised-robotics/ManiSkill/runs/zxyfngy3`. Two patches required: (1) subprocess docker push (Python SDK digest format differs on GCR); (2) L4 needs `NVIDIA_L4` accelerator type + `g2-standard-8` machine (not `NVIDIA_TESLA_L4_24TH` + n1). Patches live in `_patch_xm_vertex()` in `launch.py`.
+- [x] **Vertex AI integration tests added** — `tests/test_vertex_integration.py` with two tests (opt-in via `RUN_VERTEX_TESTS=1`): `test_vertex_hello_world` (runs `xm_hello_world.py`, checks `JOB_STATE_SUCCEEDED`) and `test_vertex_ppo_smoke_1m` (runs `ppo-smoke-1m` via `launch.py`, checks Vertex job state + wandb `global_step ≥ 900k`). Run with: `pytest tests/test_vertex_integration.py -m vertex -v --timeout=3600`
 
 ## Training Experiments
 

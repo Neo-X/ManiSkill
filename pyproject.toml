@@ -70,5 +70,5 @@ markers = [
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",
     "serial",
     "gpu_sim: marks tests as using the GPU simulation (deselect with '-m \"not gpu_sim\"')",
-    "serial",
+    "vertex: marks tests that submit real Vertex AI jobs (opt-in via RUN_VERTEX_TESTS=1)",
 ]

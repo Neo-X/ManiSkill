@@ -101,6 +101,8 @@ class Args:
     """evaluation frequency in terms of iterations"""
     save_train_video_freq: Optional[int] = None
     """frequency to save training videos in terms of iterations"""
+    num_videos: int = 10
+    """number of eval videos to record and log to wandb over the full training run (0 = never)"""
     finite_horizon_gae: bool = False
 
 
@@ -176,6 +178,7 @@ if __name__ == "__main__":
     args.batch_size = int(args.num_envs * args.num_steps)
     args.minibatch_size = int(args.batch_size // args.num_minibatches)
     args.num_iterations = args.total_timesteps // args.batch_size
+    video_step_interval = (args.total_timesteps // args.num_videos) if args.num_videos > 0 else 0
     if args.exp_name is None:
         args.exp_name = os.path.basename(__file__)[: -len(".py")]
         run_name = f"{args.env_id}__{args.exp_name}__{args.seed}__{int(time.time())}"
@@ -200,15 +203,27 @@ if __name__ == "__main__":
     if isinstance(envs.action_space, gym.spaces.Dict):
         envs = FlattenActionSpaceWrapper(envs)
         eval_envs = FlattenActionSpaceWrapper(eval_envs)
+    video_dir = None
+    video_env = None
     if args.capture_video:
-        eval_output_dir = f"runs/{run_name}/videos"
+        video_dir = f"runs/{run_name}/videos"
         if args.evaluate:
-            eval_output_dir = f"{os.path.dirname(args.checkpoint)}/test_videos"
-        print(f"Saving eval videos to {eval_output_dir}")
+            video_dir = f"{os.path.dirname(args.checkpoint)}/test_videos"
+        print(f"Saving eval videos to {video_dir}")
         if args.save_train_video_freq is not None:
-            save_video_trigger = lambda x : (x // args.num_steps) % args.save_train_video_freq == 0
+            save_video_trigger = lambda x: (x // args.num_steps) % args.save_train_video_freq == 0
             envs = RecordEpisode(envs, output_dir=f"runs/{run_name}/train_videos", save_trajectory=False, save_video_trigger=save_video_trigger, max_steps_per_video=args.num_steps, video_fps=30)
-        eval_envs = RecordEpisode(eval_envs, output_dir=eval_output_dir, save_trajectory=args.evaluate, trajectory_name="trajectory", max_steps_per_video=args.num_eval_steps, video_fps=30)
+        if args.evaluate:
+            eval_envs = RecordEpisode(eval_envs, output_dir=video_dir, save_trajectory=True, trajectory_name="trajectory", max_steps_per_video=args.num_eval_steps, video_fps=30)
+        elif args.num_videos > 0:
+            # physx_cpu avoids the global batched-render-system lock held by the physx_cuda training envs.
+            _vid_kwargs = {**env_kwargs, "sim_backend": "physx_cpu"}
+            _vid_base = gym.make(args.env_id, num_envs=1, **_vid_kwargs)
+            if isinstance(_vid_base.action_space, gym.spaces.Dict):
+                _vid_base = FlattenActionSpaceWrapper(_vid_base)
+            _vid_base = RecordEpisode(_vid_base, output_dir=video_dir, save_trajectory=False,
+                                      max_steps_per_video=args.num_eval_steps, video_fps=30)
+            video_env = ManiSkillVectorEnv(_vid_base, 1, ignore_terminations=True, record_metrics=False)
     envs = ManiSkillVectorEnv(envs, args.num_envs, ignore_terminations=not args.partial_reset, record_metrics=True)
     eval_envs = ManiSkillVectorEnv(eval_envs, args.num_eval_envs, ignore_terminations=not args.eval_partial_reset, record_metrics=True)
     assert isinstance(envs.single_action_space, gym.spaces.Box), "only continuous action space is supported"
@@ -241,6 +256,15 @@ if __name__ == "__main__":
     else:
         print("Running evaluation")
 
+    def _latest_video(out_dir: str) -> Optional[str]:
+        if not os.path.isdir(out_dir):
+            return None
+        videos = sorted(
+            [f for f in os.listdir(out_dir) if f.endswith(".mp4")],
+            key=lambda f: os.path.getmtime(os.path.join(out_dir, f)),
+        )
+        return os.path.join(out_dir, videos[-1]) if videos else None
+
     agent = Agent(envs).to(device)
     optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
 
@@ -254,6 +278,8 @@ if __name__ == "__main__":
 
     # TRY NOT TO MODIFY: start the game
     global_step = 0
+    # Initialize so first check at global_step=0 fires immediately (11 videos total: step 0 + 10 intervals)
+    last_video_step = -video_step_interval if video_step_interval > 0 else 0
     start_time = time.time()
     next_obs, _ = envs.reset(seed=args.seed)
     eval_obs, _ = eval_envs.reset(seed=args.seed)
@@ -294,6 +320,18 @@ if __name__ == "__main__":
                 print(f"eval_{k}_mean={mean}")
             if args.evaluate:
                 break
+            if video_step_interval > 0 and global_step - last_video_step >= video_step_interval:
+                if video_env is not None and args.track:
+                    obs_v, _ = video_env.reset(seed=args.seed + global_step)
+                    agent.eval()
+                    for _ in range(args.num_eval_steps):
+                        with torch.no_grad():
+                            obs_v, _, _, _, _ = video_env.step(clip_action(agent.get_action(obs_v.to(device), deterministic=True)))
+                    path = _latest_video(video_dir)
+                    if path:
+                        wandb.log({"eval/video": wandb.Video(path, fps=30, format="mp4")}, step=global_step)
+                        print(f"Video logged to wandb at step {global_step}: {path}")
+                last_video_step = global_step
         if args.save_model and iteration % args.eval_freq == 1:
             model_path = f"runs/{run_name}/ckpt_{iteration}.pt"
             torch.save(agent.state_dict(), model_path)
@@ -468,3 +506,5 @@ if __name__ == "__main__":
         logger.close()
     envs.close()
     eval_envs.close()
+    if video_env is not None:
+        video_env.close()
