@@ -103,6 +103,8 @@ class Args:
     """frequency to save training videos in terms of iterations"""
     num_videos: int = 10
     """number of eval videos to record and log to wandb over the full training run (0 = never)"""
+    env_kwargs: str = ""
+    """extra kwargs forwarded to gym.make as comma-separated key=value pairs, e.g. 'randomize_letters=true,letter_pool=ABCD'"""
     finite_horizon_gae: bool = False
 
 
@@ -173,6 +175,29 @@ class Logger:
     def close(self):
         self.writer.close()
 
+def _parse_env_kwargs(s: str) -> dict:
+    """Parse 'key=val,key=val' into a dict, coercing true/false/ints/floats."""
+    result = {}
+    for pair in s.split(","):
+        k, _, v = pair.partition("=")
+        k = k.strip()
+        v = v.strip()
+        if v.lower() == "true":
+            v = True
+        elif v.lower() == "false":
+            v = False
+        else:
+            try:
+                v = int(v)
+            except ValueError:
+                try:
+                    v = float(v)
+                except ValueError:
+                    pass
+        result[k] = v
+    return result
+
+
 if __name__ == "__main__":
     args = tyro.cli(Args)
     args.batch_size = int(args.num_envs * args.num_steps)
@@ -198,6 +223,8 @@ if __name__ == "__main__":
     env_kwargs = dict(obs_mode="state", render_mode="rgb_array", sim_backend="physx_cuda")
     if args.control_mode is not None:
         env_kwargs["control_mode"] = args.control_mode
+    if args.env_kwargs:
+        env_kwargs.update(_parse_env_kwargs(args.env_kwargs))
     envs = gym.make(args.env_id, num_envs=args.num_envs if not args.evaluate else 1, reconfiguration_freq=args.reconfiguration_freq, **env_kwargs)
     eval_envs = gym.make(args.env_id, num_envs=args.num_eval_envs, reconfiguration_freq=args.eval_reconfiguration_freq, **env_kwargs)
     if isinstance(envs.action_space, gym.spaces.Dict):
@@ -280,6 +307,8 @@ if __name__ == "__main__":
     global_step = 0
     # Initialize so first check at global_step=0 fires immediately (11 videos total: step 0 + 10 intervals)
     last_video_step = -video_step_interval if video_step_interval > 0 else 0
+    best_success = -1.0
+    best_ckpt_path = None
     start_time = time.time()
     next_obs, _ = envs.reset(seed=args.seed)
     eval_obs, _ = eval_envs.reset(seed=args.seed)
@@ -320,17 +349,41 @@ if __name__ == "__main__":
                 print(f"eval_{k}_mean={mean}")
             if args.evaluate:
                 break
+            # Track best checkpoint by success_once (fall back to success_at_end)
+            success_key = "success_once" if "success_once" in eval_metrics else "success_at_end" if "success_at_end" in eval_metrics else None
+            if success_key is not None and args.save_model:
+                success_val = torch.stack(eval_metrics[success_key]).float().mean().item()
+                if success_val > best_success:
+                    best_success = success_val
+                    best_ckpt_path = f"runs/{run_name}/best_ckpt.pt"
+                    torch.save(agent.state_dict(), best_ckpt_path)
+                    print(f"New best model: {success_key}={best_success:.3f}, saved to {best_ckpt_path}")
             if video_step_interval > 0 and global_step - last_video_step >= video_step_interval:
-                if video_env is not None and args.track:
+                if video_env is not None:
+                    # Current policy video
                     obs_v, _ = video_env.reset(seed=args.seed + global_step)
                     agent.eval()
                     for _ in range(args.num_eval_steps):
                         with torch.no_grad():
                             obs_v, _, _, _, _ = video_env.step(clip_action(agent.get_action(obs_v.to(device), deterministic=True)))
                     path = _latest_video(video_dir)
-                    if path:
+                    if path and args.track:
                         wandb.log({"eval/video": wandb.Video(path, fps=30, format="mp4")}, step=global_step)
                         print(f"Video logged to wandb at step {global_step}: {path}")
+                    # Best policy video
+                    if best_ckpt_path is not None:
+                        saved_state = {k: v.clone() for k, v in agent.state_dict().items()}
+                        agent.load_state_dict(torch.load(best_ckpt_path, map_location=device))
+                        agent.eval()
+                        obs_v, _ = video_env.reset(seed=args.seed + global_step + 1)
+                        for _ in range(args.num_eval_steps):
+                            with torch.no_grad():
+                                obs_v, _, _, _, _ = video_env.step(clip_action(agent.get_action(obs_v.to(device), deterministic=True)))
+                        best_path = _latest_video(video_dir)
+                        if best_path and args.track:
+                            wandb.log({"eval/video_best": wandb.Video(best_path, fps=30, format="mp4")}, step=global_step)
+                            print(f"Best policy video logged to wandb at step {global_step}: {best_path}")
+                        agent.load_state_dict(saved_state)
                 last_video_step = global_step
         if args.save_model and iteration % args.eval_freq == 1:
             model_path = f"runs/{run_name}/ckpt_{iteration}.pt"

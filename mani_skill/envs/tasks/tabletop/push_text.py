@@ -4,6 +4,7 @@ import numpy as np
 import sapien.core as sapien
 import sapien.render
 import torch
+import random
 
 from mani_skill import PACKAGE_ASSET_DIR
 from mani_skill.agents.robots import Fetch, Panda
@@ -48,7 +49,7 @@ SPAWN_BOUNDS = [[-0.05, -0.20], [0.15, 0.20]]
 FIXED_SPAWN_CENTER_X = 0.08
 
 # Success / reward thresholds
-PLACE_THRESH = 0.125   # letter xy distance to target for "placed"
+PLACE_THRESH = 0.075   # letter xy distance to target for "placed"
 MAX_LETTERS = 6        # cap word length so tiles fit on table
 
 
@@ -110,6 +111,10 @@ class PushTextEnv(BaseEnv):
     SUPPORTED_ROBOTS = ["panda_wristcam", "panda", "fetch"]
     agent: Union[Panda, Fetch]
 
+    # Default pool: letters with available meshes are preferred, but any letter works
+    # (falls back to a box tile).  Keep pool size reasonable — each letter adds actors.
+    DEFAULT_LETTER_POOL = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+
     def __init__(
         self,
         *args,
@@ -117,11 +122,18 @@ class PushTextEnv(BaseEnv):
         robot_init_qpos_noise: float = 0.02,
         goal_text: str = "AT",
         fixed_layout: bool = False,
+        randomize_letters: bool = False,
+        letter_pool: str = DEFAULT_LETTER_POOL,
         **kwargs,
     ):
         self.robot_init_qpos_noise = robot_init_qpos_noise
         self.goal_text = goal_text.upper().replace(" ", "")[:MAX_LETTERS]
         self.fixed_layout = fixed_layout
+        self.randomize_letters = randomize_letters
+        # Pool of letters to sample from; deduplicated and sorted for determinism.
+        self._letter_pool = sorted(set(letter_pool.upper()))
+        # When randomize_letters is True the word length is fixed at 2.
+        self._n_active = 2 if randomize_letters else len(self.goal_text)
         super().__init__(*args, robot_uids=robot_uids, **kwargs)
 
     @property
@@ -196,9 +208,9 @@ class PushTextEnv(BaseEnv):
         )
         self.table_scene.build()
 
-        n = len(self.goal_text)
+        n = self._n_active
 
-        # Compute fixed target positions (row centered on table)
+        # Compute fixed target positions (row centered on table, based on word length)
         total_span = (n - 1) * TILE_SPACING
         self.target_xys: List[List[float]] = []
         for i in range(n):
@@ -206,24 +218,49 @@ class PushTextEnv(BaseEnv):
             ty = TARGET_CENTER[1] - total_span / 2 + i * TILE_SPACING
             self.target_xys.append([tx, ty])
 
-        # Build one moveable tile + one ghost target marker per letter
-        self.letter_tiles = []
-        self.target_markers = []
-        # assign colors by letter character so same letter always same color
-        self._char_color = {}
-        color_idx = 0
-        for ch in self.goal_text:
-            if ch not in self._char_color:
-                self._char_color[ch] = _PALETTE[color_idx % len(_PALETTE)]
-                color_idx += 1
+        # Assign a permanent color to each letter so the same letter always
+        # has the same color across episodes.
+        self._char_color: dict = {}
+        if self.randomize_letters:
+            for idx, ch in enumerate(self._letter_pool):
+                self._char_color[ch] = _PALETTE[idx % len(_PALETTE)]
+        else:
+            color_idx = 0
+            for ch in self.goal_text:
+                if ch not in self._char_color:
+                    self._char_color[ch] = _PALETTE[color_idx % len(_PALETTE)]
+                    color_idx += 1
 
-        for i, ch in enumerate(self.goal_text):
-            color = self._char_color[ch]
-            ghost = [color[0], color[1], color[2], 0.30]
-            tile = _build_letter(self.scene, ch, f"tile_{i}_{ch}", color)
-            marker = _build_letter(self.scene, ch, f"target_{i}_{ch}", ghost, kinematic=True)
-            self.letter_tiles.append(tile)
-            self.target_markers.append(marker)
+        if self.randomize_letters:
+            # Pre-build tiles for every letter in the pool.  In _initialize_episode
+            # we select _n_active of them and park the rest below the table.
+            self._pool_tiles: dict = {}
+            self._pool_markers: dict = {}
+            for ch in self._letter_pool:
+                color = self._char_color[ch]
+                ghost = [color[0], color[1], color[2], 0.30]
+                self._pool_tiles[ch] = _build_letter(
+                    self.scene, ch, f"pool_tile_{ch}", color
+                )
+                self._pool_markers[ch] = _build_letter(
+                    self.scene, ch, f"pool_marker_{ch}", ghost, kinematic=True
+                )
+            # Start with the first _n_active letters as the initial active set.
+            init_letters = self._letter_pool[:self._n_active]
+            self.letter_tiles = [self._pool_tiles[ch] for ch in init_letters]
+            self.target_markers = [self._pool_markers[ch] for ch in init_letters]
+            self.goal_text = "".join(init_letters)
+        else:
+            # Original fixed-word path: one tile + one marker per letter.
+            self.letter_tiles = []
+            self.target_markers = []
+            for i, ch in enumerate(self.goal_text):
+                color = self._char_color[ch]
+                ghost = [color[0], color[1], color[2], 0.30]
+                tile = _build_letter(self.scene, ch, f"tile_{i}_{ch}", color)
+                marker = _build_letter(self.scene, ch, f"target_{i}_{ch}", ghost, kinematic=True)
+                self.letter_tiles.append(tile)
+                self.target_markers.append(marker)
 
     # ------------------------------------------------------------------
     # Episode init
@@ -232,6 +269,28 @@ class PushTextEnv(BaseEnv):
     def _initialize_episode(self, env_idx: torch.Tensor, options: dict):
         self._ocr_bonus = torch.zeros(self.num_envs, device=self.device)
         self._ocr_step_counter = 0
+
+        if self.randomize_letters:
+            # Pick _n_active unique letters at random (same choice for all envs
+            # in this reset batch — per-env letter diversity is not yet supported).
+            chosen = random.sample(self._letter_pool, self._n_active)
+            self.goal_text = "".join(chosen)
+            self.letter_tiles = [self._pool_tiles[ch] for ch in chosen]
+            self.target_markers = [self._pool_markers[ch] for ch in chosen]
+
+            # Park all inactive pool tiles and markers well below the table so
+            # they do not interfere with physics or observations.
+            parked = Pose.create_from_pq(
+                p=torch.tensor([[0.0, 0.0, -100.0]]).expand(self.num_envs, -1),
+                q=torch.tensor([[1.0, 0.0, 0.0, 0.0]]).expand(self.num_envs, -1),
+            )
+            for ch, tile in self._pool_tiles.items():
+                if ch not in chosen:
+                    tile.set_pose(parked)
+            for ch, marker in self._pool_markers.items():
+                if ch not in chosen:
+                    marker.set_pose(parked)
+
         with torch.device(self.device):
             b = len(env_idx)
             self.table_scene.initialize(env_idx)

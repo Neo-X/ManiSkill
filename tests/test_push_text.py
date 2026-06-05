@@ -24,7 +24,7 @@ import torch
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _make_env(fixed_layout: bool = False, num_envs: int = 1):
+def _make_env(fixed_layout: bool = False, num_envs: int = 1, **extra_kwargs):
     kwargs = dict(
         obs_mode="state",
         render_mode=None,
@@ -33,6 +33,7 @@ def _make_env(fixed_layout: bool = False, num_envs: int = 1):
     )
     if fixed_layout:
         kwargs["fixed_layout"] = True
+    kwargs.update(extra_kwargs)
     return gym.make("PushText-v1", num_envs=num_envs, **kwargs)
 
 
@@ -153,6 +154,92 @@ class TestDevices:
         base = getattr(env, "unwrapped", env)
         render_device = getattr(base, "_render_device", None)
         assert render_device is None
+        env.close()
+
+
+# ---------------------------------------------------------------------------
+# Randomize-letters tests
+# ---------------------------------------------------------------------------
+
+class TestRandomizeLetters:
+    """Tests for the randomize_letters=True mode of PushText-v1."""
+
+    def test_env_creates_with_randomize_letters(self):
+        env = _make_env(randomize_letters=True)
+        assert env is not None
+        env.close()
+
+    def test_goal_text_is_two_letters(self):
+        env = _make_env(randomize_letters=True)
+        env.reset(seed=0)
+        word = env.unwrapped.goal_text
+        assert len(word) == 2, f"Expected 2-letter word, got {word!r}"
+        env.close()
+
+    def test_active_tiles_match_goal_text(self):
+        env = _make_env(randomize_letters=True)
+        env.reset(seed=0)
+        u = env.unwrapped
+        tile_letters = [t.name.split("_")[-1] for t in u.letter_tiles]
+        assert tile_letters == list(u.goal_text), (
+            f"Active tiles {tile_letters} don't match goal_text {u.goal_text!r}"
+        )
+        env.close()
+
+    def test_words_differ_across_episodes(self):
+        """Repeated resets should eventually produce different letter pairs."""
+        env = _make_env(randomize_letters=True)
+        words = set()
+        for seed in range(20):
+            env.reset(seed=seed)
+            words.add(env.unwrapped.goal_text)
+        env.close()
+        assert len(words) > 1, f"All 20 resets produced the same word: {words}"
+
+    def test_letters_from_pool_only(self):
+        pool = "ABCDE"
+        env = _make_env(randomize_letters=True, letter_pool=pool)
+        for seed in range(10):
+            env.reset(seed=seed)
+            for ch in env.unwrapped.goal_text:
+                assert ch in pool, f"Letter {ch!r} not in pool {pool!r}"
+        env.close()
+
+    def test_pool_is_deduplicated_and_sorted(self):
+        env = _make_env(randomize_letters=True, letter_pool="CCBBAAD")
+        assert env.unwrapped._letter_pool == ["A", "B", "C", "D"]
+        env.close()
+
+    def test_step_after_randomize_reset(self):
+        env = _make_env(randomize_letters=True)
+        env.reset(seed=42)
+        obs, rew, term, trunc, info = env.step(env.action_space.sample())
+        rew_val = rew.cpu().item() if isinstance(rew, torch.Tensor) else float(rew)
+        assert np.isfinite(rew_val)
+        env.close()
+
+    def test_reward_shape_matches_num_envs(self):
+        env = _make_env(randomize_letters=True)
+        env.reset(seed=0)
+        _, rew, _, _, _ = env.step(env.action_space.sample())
+        assert rew.shape == (1,)
+        env.close()
+
+    def test_multiple_episodes_no_crash(self):
+        env = _make_env(randomize_letters=True)
+        for seed in range(5):
+            env.reset(seed=seed)
+            for _ in range(10):
+                env.step(env.action_space.sample())
+        env.close()
+
+    def test_inactive_pool_tiles_exist(self):
+        """All 26 pool tiles must be built even if only 2 are active."""
+        env = _make_env(randomize_letters=True)
+        env.reset(seed=0)
+        u = env.unwrapped
+        assert len(u._pool_tiles) == 26
+        assert len(u._pool_markers) == 26
         env.close()
 
 

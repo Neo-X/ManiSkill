@@ -46,6 +46,7 @@ from xmanager import xm
 DOCKER_IMAGE  = "gberseth/maniskill-ppo:latest"
 GCP_PROJECT   = "legoassembly"
 GCP_ZONE      = "northamerica-northeast1-a"
+GCP_REGION    = "northamerica-northeast1"
 
 # Absolute repo root — xm.Dockerfile resolves paths relative to the launcher
 # script, so we must pass absolute paths to avoid landing inside scripts/.
@@ -392,11 +393,12 @@ def _patch_xm_vertex() -> None:
 
 
 def launch_vertex(job_name: str, job_def: dict, env_vars: dict,
-                  dry_run: bool = False) -> None:
+                  dry_run: bool = False, region: str = GCP_REGION) -> None:
     from xmanager import xm_local
     _patch_xm_vertex()
     os.environ.setdefault("GOOGLE_CLOUD_BUCKET_NAME", "legoassembly-xmanager")
     os.environ.setdefault("GOOGLE_CLOUD_PROJECT", GCP_PROJECT)
+    os.environ["GOOGLE_CLOUD_REGION"] = region
 
     use_gpu = bool(job_def.get("gpu_type"))
 
@@ -509,18 +511,24 @@ def parse_args():
                         help="Slurm partition override")
     parser.add_argument("--zone", default=GCP_ZONE,
                         help=f"GCP zone for Compute Engine (default: {GCP_ZONE})")
+    parser.add_argument("--region", default=GCP_REGION,
+                        help=f"GCP region for Vertex AI (default: {GCP_REGION})")
     parser.add_argument("--wandb-key", default=None,
                         help="W&B API key (auto-read from ~/.netrc if omitted)")
     parser.add_argument("--dry-run", action="store_true",
                         help="Print the launch command without executing")
-    return parser.parse_args()
+    args, extra_args = parser.parse_known_args()
+    args.extra_args = extra_args
+    return args
 
 
 _cli_args = parse_args()
 
 
 def main(_):
-    job_def = JOBS[_cli_args.job]
+    job_def = dict(JOBS[_cli_args.job])  # shallow copy so we don't mutate the global
+    if _cli_args.extra_args:
+        job_def["cmd"] = list(job_def["cmd"]) + list(_cli_args.extra_args)
 
     wandb_key = _cli_args.wandb_key or get_wandb_key()
     if wandb_key is None:
@@ -531,7 +539,7 @@ def main(_):
 
     elif _cli_args.cluster == "vertex":
         env_vars = {"WANDB_API_KEY": wandb_key, "WANDB_ENTITY": "unsupervised-robotics"} if wandb_key else {}
-        launch_vertex(_cli_args.job, job_def, env_vars, _cli_args.dry_run)
+        launch_vertex(_cli_args.job, job_def, env_vars, _cli_args.dry_run, _cli_args.region)
 
     else:
         env_vars = {"WANDB_API_KEY": wandb_key, "WANDB_ENTITY": "unsupervised-robotics"} if wandb_key else {}
