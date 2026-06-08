@@ -57,7 +57,7 @@ class Args:
     """the learning rate of the optimizer"""
     num_envs: int = 512
     """the number of parallel environments"""
-    num_eval_envs: int = 8
+    num_eval_envs: int = 128
     """the number of parallel evaluation environments"""
     partial_reset: bool = True
     """whether to let parallel environments reset upon termination instead of truncation"""
@@ -75,7 +75,7 @@ class Args:
     """the control mode to use for the environment"""
     anneal_lr: bool = False
     """Toggle learning rate annealing for policy and value networks"""
-    gamma: float = 0.8
+    gamma: float = 0.95
     """the discount factor gamma"""
     gae_lambda: float = 0.9
     """the lambda for the general advantage estimation"""
@@ -99,6 +99,16 @@ class Args:
     """the target KL divergence threshold"""
     reward_scale: float = 1.0
     """Scale the reward by this factor"""
+
+    use_layer_norm: bool = False
+    """Whether or not to use layer normalization in the policy and value networks"""
+    num_layers: int = 2
+    """Number of layers in the policy and value networks"""
+    num_units: int = 128
+    """Number of units per layer in the policy and value networks"""
+    activation: str = "tanh"
+    """Activation function for hidden layers: tanh, relu, elu, leaky_relu, silu"""
+
     eval_freq: int = 25
     """evaluation frequency in terms of iterations"""
     save_train_video_freq: Optional[int] = None
@@ -124,6 +134,15 @@ class Args:
     num_iterations: int = 0
     """the number of iterations (computed in runtime)"""
 
+_ACTIVATIONS = {
+    "tanh": nn.Tanh,
+    "relu": nn.ReLU,
+    "elu": nn.ELU,
+    "leaky_relu": nn.LeakyReLU,
+    "silu": nn.SiLU,
+}
+
+
 def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
     torch.nn.init.orthogonal_(layer.weight, std)
     torch.nn.init.constant_(layer.bias, bias_const)
@@ -133,25 +152,33 @@ def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
 class Agent(nn.Module):
     def __init__(self, envs):
         super().__init__()
-        self.critic = nn.Sequential(
-            layer_init(nn.Linear(np.array(envs.single_observation_space.shape).prod(), 256)),
-            nn.Tanh(),
-            layer_init(nn.Linear(256, 256)),
-            nn.Tanh(),
-            layer_init(nn.Linear(256, 256)),
-            nn.Tanh(),
-            layer_init(nn.Linear(256, 1)),
-        )
-        self.actor_mean = nn.Sequential(
-            layer_init(nn.Linear(np.array(envs.single_observation_space.shape).prod(), 256)),
-            nn.Tanh(),
-            layer_init(nn.Linear(256, 256)),
-            nn.Tanh(),
-            layer_init(nn.Linear(256, 256)),
-            nn.Tanh(),
-            layer_init(nn.Linear(256, np.prod(envs.single_action_space.shape)), std=0.01*np.sqrt(2)),
-        )
-        self.actor_logstd = nn.Parameter(torch.ones(1, np.prod(envs.single_action_space.shape)) * -0.5)
+        act_cls = _ACTIVATIONS[args.activation]
+        layers = [
+                  layer_init(nn.Linear(np.array(envs.single_observation_space.shape).prod(), args.num_units)),
+                  act_cls()]
+        for i in range(args.num_layers-2):
+            layers.append(layer_init(nn.Linear(args.num_units, args.num_units)))
+            layers.append(act_cls())
+            if args.use_layer_norm:
+                layers.append(nn.LayerNorm(args.num_units))
+
+        layers.append(layer_init(nn.Linear(args.num_units, 1), std=1.0))
+        self.critic = nn.Sequential(*layers)
+
+        layers = [
+                  layer_init(nn.Linear(np.array(envs.single_observation_space.shape).prod(), args.num_units)),
+                  act_cls()]
+        for i in range(args.num_layers-2):
+            layers.append(layer_init(nn.Linear(args.num_units, args.num_units)))
+            layers.append(act_cls())
+            if args.use_layer_norm:
+                layers.append(nn.LayerNorm(args.num_units))
+
+        layers.append(layer_init(nn.Linear(args.num_units, np.prod(envs.single_action_space.shape)), std=0.01))
+        layers.append(nn.Tanh())
+
+        self.actor_mean = nn.Sequential(*layers)
+        self.actor_logstd = nn.Parameter(torch.zeros(1, np.prod(envs.single_action_space.shape)))
 
     def get_value(self, x):
         return self.critic(x)
@@ -171,6 +198,9 @@ class Agent(nn.Module):
         if action is None:
             action = probs.sample()
         return action, probs.log_prob(action).sum(1), probs.entropy().sum(1), self.critic(x)
+    
+    def get_action_deterministic(self, x):
+        return self.actor_mean(x, deterministic=True)
 
 class Logger:
     def __init__(self, log_wandb=False, tensorboard: SummaryWriter = None) -> None:

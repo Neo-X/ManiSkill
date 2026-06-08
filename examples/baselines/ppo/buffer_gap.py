@@ -188,7 +188,7 @@ class BufferGapV2():
             for t in range(max_t):
                 actions = [self._best_traj[t] for _ in range(_envs.num_envs)] if best==True else self._policy.get_action(torch.as_tensor(obs).to(self._device), deterministic=True).detach().cpu().numpy()
                 obs, reward, terminations, truncations, infos = _envs.step(actions)
-                return_ += reward[0]
+                return_ += float(reward[0])
                 if terminations.any() or truncations.any():
                     return return_
             returns.append(return_)

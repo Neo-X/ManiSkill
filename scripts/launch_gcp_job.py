@@ -109,7 +109,7 @@ JOBS = {
             " --track --wandb-project-name ManiSkill --wandb-entity unsupervised-robotics"
             " --env_id PushText-v1"
             " --num_envs 2048 --no-capture-video"
-            " --num-eval-envs 16 --num-steps 16 --num_eval_steps 100"
+            " --num-eval-envs 128 --num-steps 16 --num_eval_steps 100"
             " --update_epochs 8 --num_minibatches 32"
             " --gamma 0.8 --total_timesteps 100000000"
             " --exp-name push-text-v1-t4-100M"

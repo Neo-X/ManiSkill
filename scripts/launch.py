@@ -45,7 +45,7 @@ from xmanager import xm
 
 DOCKER_IMAGE  = "gberseth/maniskill-ppo:latest"
 GCP_PROJECT   = "legoassembly"
-GCP_ZONE      = "northamerica-northeast1-a"
+GCP_ZONE      = "northamerica-northeast1-b"
 GCP_REGION    = "northamerica-northeast1"
 
 # Absolute repo root — xm.Dockerfile resolves paths relative to the launcher

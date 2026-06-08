@@ -108,6 +108,7 @@ The robot must pick up and place fridge-magnet-style letter tiles on a white tab
 - [x] **Partial-reset shape mismatch bug fixed** — `_initialize_episode` was creating the parked pose with shape `[num_envs, 7]` but ManiSkill's GPU `set_pose` indexes only the envs in `_reset_mask` (shape `[len(env_idx), 7]`). On the first reset (all envs) the shapes matched; on subsequent partial resets (one env terminates mid-training) it crashed with `RuntimeError: shape mismatch [4096,7] cannot broadcast to [1,7]`. Fix: compute `b = len(env_idx)` before the randomize block and use `.repeat(b, 1)` for the parked pose. Regression test added: `TestRandomizeLetters::test_partial_reset_does_not_crash`.
 - [x] **Multi-seed launching via `--seeds`** — `launch.py` now accepts `--seeds 1 2 3` to submit one Vertex AI job per seed in a single experiment (one docker build, multiple `experiment.add()` calls). Each job gets `--seed N` appended and, when >1 seed, `--exp-name <base>-sN` so wandb runs are distinct. Confirmed working: two seeds appeared in wandb as `gcp-t4-ppo-test-s1` / `gcp-t4-ppo-test-s2`. Unit tests in `tests/test_push_text.py::TestLauncherMultiSeed`.
 - [x] **`--anneal-lr` available as passthrough flag** — Linear LR annealing is implemented in `ppo_upstream.py` (`anneal_lr: bool = False`) and can be enabled at launch time without modifying the job definition: pass `--anneal-lr` as an extra arg to `launch.py`.
+- [x] **`buffer_gap` logging ported to `ppo_upstream.py`** — `BufferGapV2` return tracking, `gap_eval_env` (GPU-backed, `num_envs=1`), and `plot_gap()` call (every `plot_freq` iterations) added to the GPU training script. `conftest.py` added to `tests/` so `import buffer_gap` works without per-file path hacks. 6 unit tests in `TestBufferGap`; smoke-tested in Docker on T4 VM (6/6 pass, training loop clean). **Tensor/numpy fix:** `buffer_gap.py` was designed for numpy-based CPU PPO; `ManiSkillVectorEnv.step()` returns torch tensors. Fixed `eval_deterministic()` to cast `reward[0]` via `float(reward[0])` so `np.mean()` receives a plain Python scalar instead of a tensor. Docker image rebuilt and pushed after fix.
 
 ## Training Experiments
 
@@ -159,6 +160,25 @@ The **fixed-seed approach** is simpler and directly answers the question: given 
   log and monitor BC loss alongside deterministic return from replayed top trajectory to detect whether cloning signal is meaningful.
 - [ ] Gate conclusions on deterministic diagnostics first:
   if deterministic replay is not reproducible, imitation quality measurements are unreliable and must be fixed before further reward/model tuning.
+
+### Current state (June 2026): learning is improving — challenge is best-checkpoint selection
+
+Policy learning is now making measurable progress. The immediate bottleneck has shifted from "why isn't the policy learning?" to **"which checkpoint is actually the best, and how do we reliably detect it?"**
+
+Three compounding sources of variance make this hard:
+
+1. **Stochastic policy at eval time** — the policy samples from a Gaussian during rollouts, so the same checkpoint produces different returns on repeated runs. A single eval episode can look great or terrible by chance.
+
+2. **Single-episode video per checkpoint** — each wandb video upload is one rollout. One episode is far too noisy to judge policy quality; a lucky random action sequence can outperform a genuinely better policy that happened to fail once.
+
+3. **Random object initialization** — letter spawn positions are re-randomized every episode, so even a deterministic policy faces different scenes. A checkpoint saved after a run where the tiles happened to spawn near their targets will appear much better than an identical policy evaluated on a harder initialization.
+
+#### What needs to change to reliably select the best checkpoint
+
+- **Evaluate over N episodes, not 1** — the `best_success` tracker in `ppo_upstream.py` currently gates on a single `eval_freq` window. It should average over at least 10–20 episodes at fixed seeds before updating the best checkpoint.
+- **Use deterministic policy for checkpoint selection** — `get_action(..., deterministic=True)` removes policy variance from the comparison. The stochastic policy should only be used for exploration during training rollouts, not for checkpoint scoring.
+- **Fixed eval seeds** — checkpoint comparison should use the same set of fixed seeds every time, eliminating environment initialization variance. This is independent of (and complementary to) the fixed-layout training mode.
+- **Track `success_once` not mean reward** — episode return is noisy and task-specific. `success_once` (did the policy ever succeed in this episode?) is a more stable signal for checkpoint selection in sparse-reward tasks.
 
 ## PushT-v1 Baseline Experiments
 
