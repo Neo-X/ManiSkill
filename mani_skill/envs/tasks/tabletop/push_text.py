@@ -269,6 +269,7 @@ class PushTextEnv(BaseEnv):
     def _initialize_episode(self, env_idx: torch.Tensor, options: dict):
         self._ocr_bonus = torch.zeros(self.num_envs, device=self.device)
         self._ocr_step_counter = 0
+        b = len(env_idx)
 
         if self.randomize_letters:
             # Pick _n_active unique letters at random (same choice for all envs
@@ -280,9 +281,11 @@ class PushTextEnv(BaseEnv):
 
             # Park all inactive pool tiles and markers well below the table so
             # they do not interfere with physics or observations.
+            # Use b (not self.num_envs): set_pose indexes only the envs in _reset_mask,
+            # so the tensor must match the number of envs being reset this call.
             parked = Pose.create_from_pq(
-                p=torch.tensor([[0.0, 0.0, -100.0]]).expand(self.num_envs, -1),
-                q=torch.tensor([[1.0, 0.0, 0.0, 0.0]]).expand(self.num_envs, -1),
+                p=torch.tensor([[0.0, 0.0, -100.0]], device=self.device).repeat(b, 1),
+                q=torch.tensor([[1.0, 0.0, 0.0, 0.0]], device=self.device).repeat(b, 1),
             )
             for ch, tile in self._pool_tiles.items():
                 if ch not in chosen:
@@ -292,7 +295,6 @@ class PushTextEnv(BaseEnv):
                     marker.set_pose(parked)
 
         with torch.device(self.device):
-            b = len(env_idx)
             self.table_scene.initialize(env_idx)
 
             # 90° clockwise rotation around Z (looking down) so letters read correctly

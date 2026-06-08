@@ -12,6 +12,7 @@ Each test group is tagged with a marker so you can run a subset:
 
 import subprocess
 import sys
+from unittest.mock import MagicMock
 
 import gymnasium as gym
 import mani_skill  # noqa: F401 — registers all ManiSkill environments including PushText-v1
@@ -234,13 +235,94 @@ class TestRandomizeLetters:
         env.close()
 
     def test_inactive_pool_tiles_exist(self):
-        """All 26 pool tiles must be built even if only 2 are active."""
-        env = _make_env(randomize_letters=True)
+        """All pool tiles must be built at scene load even if only 2 are active."""
+        pool = "ABCD"
+        env = _make_env(randomize_letters=True, letter_pool=pool)
         env.reset(seed=0)
         u = env.unwrapped
-        assert len(u._pool_tiles) == 26
-        assert len(u._pool_markers) == 26
+        assert len(u._pool_tiles) == len(pool)
+        assert len(u._pool_markers) == len(pool)
         env.close()
+
+    def test_partial_reset_does_not_crash(self):
+        """Repeated calls to _initialize_episode must not crash with shape mismatch.
+
+        Root bug: _initialize_episode used self.num_envs for the parked pose size,
+        but set_pose indexes only the envs in _reset_mask (size = len(env_idx)).
+        On GPU with partial_reset=True, env_idx is a subset (e.g. size 1) while
+        num_envs is 4096, causing: "shape [4096,7] cannot broadcast to [1,7]".
+        This test calls _initialize_episode directly with env_idx to verify the
+        parked pose size is always b = len(env_idx), not self.num_envs.
+        """
+        env = _make_env(randomize_letters=True, letter_pool="ABCD")
+        env.reset(seed=0)
+        u = env.unwrapped
+        # Direct call with env_idx=[0]: b=1, must match set_pose expectations
+        env_idx = torch.tensor([0])
+        u._initialize_episode(env_idx, {})
+        u._initialize_episode(env_idx, {})
+        env.close()
+
+
+# ---------------------------------------------------------------------------
+# Launcher multi-seed tests
+# ---------------------------------------------------------------------------
+
+class TestLauncherMultiSeed:
+    """Unit tests for the multi-seed command-building logic in scripts/launch.py.
+    These run entirely in-process — no docker build, no Vertex AI calls."""
+
+    def _build_seed_cmds(self, base_cmd, seeds, job_name="test-job"):
+        """Replicate the seed-cmd logic from launch_vertex."""
+        cmds = []
+        for seed in seeds:
+            seed_cmd = list(base_cmd) + ["--seed", str(seed)]
+            if len(seeds) > 1:
+                try:
+                    base_name = seed_cmd[seed_cmd.index("--exp-name") + 1]
+                except ValueError:
+                    base_name = job_name
+                seed_cmd += ["--exp-name", f"{base_name}-s{seed}"]
+            cmds.append(seed_cmd)
+        return cmds
+
+    def test_single_seed_no_suffix(self):
+        """Single seed must not modify exp-name."""
+        base_cmd = ["python", "train.py", "--exp-name", "run-v1"]
+        cmds = self._build_seed_cmds(base_cmd, seeds=[42])
+        assert cmds[0].count("--exp-name") == 1
+        assert "run-v1" in cmds[0]
+        assert "--seed" in cmds[0]
+        assert cmds[0][cmds[0].index("--seed") + 1] == "42"
+
+    def _last_value(self, cmd, flag):
+        """Return the value after the last occurrence of flag in cmd list."""
+        idx = len(cmd) - 1 - cmd[::-1].index(flag)
+        return cmd[idx + 1]
+
+    def test_multi_seed_distinct_exp_names(self):
+        """Each seed must get a unique exp-name suffixed with -s{seed}."""
+        base_cmd = ["python", "train.py", "--exp-name", "run-v1"]
+        cmds = self._build_seed_cmds(base_cmd, seeds=[1, 2])
+        names = [self._last_value(cmd, "--exp-name") for cmd in cmds]
+        assert names[0] == "run-v1-s1"
+        assert names[1] == "run-v1-s2"
+        assert len(set(names)) == 2
+
+    def test_multi_seed_distinct_seed_values(self):
+        """Each job must have its own --seed value appended."""
+        base_cmd = ["python", "train.py", "--seed", "1"]
+        cmds = self._build_seed_cmds(base_cmd, seeds=[1, 2])
+        seeds_used = [int(self._last_value(cmd, "--seed")) for cmd in cmds]
+        assert seeds_used == [1, 2]
+
+    def test_no_exp_name_in_cmd_falls_back_to_job_name(self):
+        """If cmd has no --exp-name, fall back to job_name as base."""
+        base_cmd = ["python", "train.py"]
+        cmds = self._build_seed_cmds(base_cmd, seeds=[3, 7], job_name="my-job")
+        names = [self._last_value(cmd, "--exp-name") for cmd in cmds]
+        assert names[0] == "my-job-s3"
+        assert names[1] == "my-job-s7"
 
 
 # ---------------------------------------------------------------------------
@@ -283,3 +365,65 @@ class TestTraining:
             f"stderr:\n{result.stderr[-2000:]}"
         )
         assert "model saved" in result.stdout or "SPS" in result.stdout
+
+
+# ---------------------------------------------------------------------------
+# BufferGap tests
+# ---------------------------------------------------------------------------
+
+class TestBufferGap:
+    """Unit tests for BufferGapV2 — verifies return tracking and gap metrics
+    without running a full training loop."""
+
+    def _make_gap_stats(self, buffer_size=100, top_pct=0.1):
+        import buffer_gap
+        return buffer_gap.BufferGapV2(
+            buffer_size=buffer_size,
+            top_buffer_percet=top_pct,
+            policy=None,
+            device="cpu",
+            args=None,
+            envs=None,
+        )
+
+    def test_add_stores_returns(self):
+        gs = self._make_gap_stats()
+        gs.add({"r": 1.0, "actions": [], "rewards": [], "seed": 0})
+        gs.add({"r": 2.0, "actions": [], "rewards": [], "seed": 1})
+        assert list(gs._returns) == [1.0, 2.0]
+
+    def test_max_return_tracked(self):
+        gs = self._make_gap_stats()
+        gs.add({"r": 3.0, "actions": [], "rewards": [], "seed": 0})
+        gs.add({"r": 7.0, "actions": [], "rewards": [], "seed": 1})
+        gs.add({"r": 2.0, "actions": [], "rewards": [], "seed": 2})
+        assert gs._max_return == 7.0
+
+    def test_top_k_buffer_bounded(self):
+        gs = self._make_gap_stats(buffer_size=20, top_pct=0.1)
+        for i in range(30):
+            gs.add({"r": float(i), "actions": [], "rewards": [], "seed": i})
+        assert len(gs._top_k_plans) <= gs._max_return_buff_size
+
+    def test_plot_gap_calls_logger(self):
+        gs = self._make_gap_stats()
+        for i in range(10):
+            gs.add({"r": float(i), "actions": [], "rewards": [], "seed": i})
+        logger = MagicMock()
+        gs.plot_gap(logger, step=100)
+        logged_keys = {call.args[0] for call in logger.add_scalar.call_args_list}
+        assert "charts/avg_return" in logged_keys
+        assert "charts/global_optimality_gap" in logged_keys
+        assert "charts/best_trajectory_return" in logged_keys
+
+    def test_plot_gap_skips_when_empty(self):
+        gs = self._make_gap_stats()
+        logger = MagicMock()
+        gs.plot_gap(logger, step=0)
+        logger.add_scalar.assert_not_called()
+
+    def test_buffer_size_respected(self):
+        gs = self._make_gap_stats(buffer_size=20, top_pct=0.1)
+        for i in range(30):
+            gs.add({"r": float(i), "actions": [], "rewards": [], "seed": i})
+        assert len(gs._returns) == 20

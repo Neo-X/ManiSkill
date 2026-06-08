@@ -14,6 +14,8 @@ import tyro
 from torch.distributions.normal import Normal
 from torch.utils.tensorboard import SummaryWriter
 
+import buffer_gap
+
 # ManiSkill specific imports
 import mani_skill.envs
 from mani_skill.utils import gym_utils
@@ -106,6 +108,12 @@ class Args:
     env_kwargs: str = ""
     """extra kwargs forwarded to gym.make as comma-separated key=value pairs, e.g. 'randomize_letters=true,letter_pool=ABCD'"""
     finite_horizon_gae: bool = False
+    return_buffer_size: int = 10_000
+    """size of the episode-return buffer for sub-optimality gap tracking"""
+    top_return_buff_percentage: float = 0.05
+    """top-k% of returns to use as the experience-optimal estimate"""
+    plot_freq: int = 5
+    """log gap metrics every this many PPO iterations"""
 
 
     # to be filled in runtime
@@ -295,6 +303,16 @@ if __name__ == "__main__":
     agent = Agent(envs).to(device)
     optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
 
+    gap_eval_env = ManiSkillVectorEnv(
+        gym.make(args.env_id, num_envs=1, **env_kwargs),
+        1, ignore_terminations=False, record_metrics=True,
+    )
+    gap_stats = buffer_gap.BufferGapV2(
+        args.return_buffer_size, args.top_return_buff_percentage,
+        policy=agent, device=device, args=args, envs=gap_eval_env,
+    )
+    _ep_return_buf = torch.zeros(args.num_envs, device=device)
+
     # ALGO Logic: Storage setup
     obs = torch.zeros((args.num_steps, args.num_envs) + envs.single_observation_space.shape).to(device)
     actions = torch.zeros((args.num_steps, args.num_envs) + envs.single_action_space.shape).to(device)
@@ -412,6 +430,14 @@ if __name__ == "__main__":
             next_obs, reward, terminations, truncations, infos = envs.step(clip_action(action))
             next_done = torch.logical_or(terminations, truncations).to(torch.float32)
             rewards[step] = reward.view(-1) * args.reward_scale
+
+            _ep_return_buf += reward.view(-1)
+            _done_mask = next_done.bool()
+            if _done_mask.any():
+                for env_idx in _done_mask.nonzero(as_tuple=False).flatten().tolist():
+                    gap_stats.add({"r": _ep_return_buf[env_idx].item(),
+                                   "actions": [], "rewards": [], "seed": args.seed + env_idx})
+                _ep_return_buf[_done_mask] = 0.0
 
             if "final_info" in infos:
                 final_info = infos["final_info"]
@@ -551,6 +577,8 @@ if __name__ == "__main__":
         logger.add_scalar("time/update_time", update_time, global_step)
         logger.add_scalar("time/rollout_time", rollout_time, global_step)
         logger.add_scalar("time/rollout_fps", args.num_envs * args.num_steps / rollout_time, global_step)
+        if iteration % args.plot_freq == 0 and gap_stats._returns:
+            gap_stats.plot_gap(logger, global_step)
     if not args.evaluate:
         if args.save_model:
             model_path = f"runs/{run_name}/final_ckpt.pt"
@@ -559,5 +587,6 @@ if __name__ == "__main__":
         logger.close()
     envs.close()
     eval_envs.close()
+    gap_eval_env.close()
     if video_env is not None:
         video_env.close()

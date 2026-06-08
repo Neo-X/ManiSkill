@@ -393,7 +393,8 @@ def _patch_xm_vertex() -> None:
 
 
 def launch_vertex(job_name: str, job_def: dict, env_vars: dict,
-                  dry_run: bool = False, region: str = GCP_REGION) -> None:
+                  dry_run: bool = False, region: str = GCP_REGION,
+                  seeds: list[int] = None) -> None:
     from xmanager import xm_local
     _patch_xm_vertex()
     os.environ.setdefault("GOOGLE_CLOUD_BUCKET_NAME", "legoassembly-xmanager")
@@ -412,17 +413,19 @@ def launch_vertex(job_name: str, job_def: dict, env_vars: dict,
             memory=job_def["ram_gib"] * xm.GiB,
         )
 
+    if seeds is None:
+        seeds = [1]
+
     if dry_run:
-        print(f"DRY RUN — Vertex AI job '{job_name}'")
+        print(f"DRY RUN — Vertex AI job '{job_name}' × {len(seeds)} seed(s): {seeds}")
         print(f"  dockerfile:   {os.path.join(_REPO_ROOT, 'docker', 'Dockerfile')} (build context: {_REPO_ROOT})")
         print(f"  requirements: {requirements}")
         print(f"  args:         {job_def['cmd']}")
         print(f"  env_vars:     { {k: '***' if 'KEY' in k else v for k, v in env_vars.items()} }")
         return
 
-    # Builds the image from docker/Dockerfile (project root as context), pushes
-    # to GCR, and submits to Vertex AI — local code changes are included
-    # automatically without a separate docker build/push step.
+    # Builds the image once, then submits one job per seed.  All seeds share
+    # the same image build — only one docker push regardless of seed count.
     with xm_local.create_experiment(
         experiment_title=f"ManiSkill-{job_name}",
     ) as experiment:
@@ -436,16 +439,27 @@ def launch_vertex(job_name: str, job_def: dict, env_vars: dict,
             )
         ])
 
-        experiment.add(
-            xm.Job(
-                executable=executable,
-                executor=xm_local.Vertex(requirements=requirements),
-                args=job_def["cmd"],
-                env_vars=env_vars,
+        for seed in seeds:
+            # Override --seed in the command (tyro uses last occurrence).
+            seed_cmd = list(job_def["cmd"]) + ["--seed", str(seed)]
+            # When running multiple seeds, append -s{seed} to the exp-name so
+            # each run gets a distinct name in wandb.
+            if len(seeds) > 1:
+                try:
+                    base_name = seed_cmd[seed_cmd.index("--exp-name") + 1]
+                except ValueError:
+                    base_name = job_name
+                seed_cmd += ["--exp-name", f"{base_name}-s{seed}"]
+            experiment.add(
+                xm.Job(
+                    executable=executable,
+                    executor=xm_local.Vertex(requirements=requirements),
+                    args=seed_cmd,
+                    env_vars=env_vars,
+                )
             )
-        )
 
-    print(f"Submitted '{job_name}' to Vertex AI (gpu={use_gpu})")
+    print(f"Submitted '{job_name}' × {len(seeds)} seeds {seeds} to Vertex AI (gpu={use_gpu})")
 
 
 # ---------------------------------------------------------------------------
@@ -515,6 +529,8 @@ def parse_args():
                         help=f"GCP region for Vertex AI (default: {GCP_REGION})")
     parser.add_argument("--wandb-key", default=None,
                         help="W&B API key (auto-read from ~/.netrc if omitted)")
+    parser.add_argument("--seeds", type=int, nargs="+", default=[1],
+                        help="Random seeds to run (one Vertex AI job per seed, default: 1)")
     parser.add_argument("--dry-run", action="store_true",
                         help="Print the launch command without executing")
     args, extra_args = parser.parse_known_args()
@@ -539,7 +555,8 @@ def main(_):
 
     elif _cli_args.cluster == "vertex":
         env_vars = {"WANDB_API_KEY": wandb_key, "WANDB_ENTITY": "unsupervised-robotics"} if wandb_key else {}
-        launch_vertex(_cli_args.job, job_def, env_vars, _cli_args.dry_run, _cli_args.region)
+        launch_vertex(_cli_args.job, job_def, env_vars, _cli_args.dry_run, _cli_args.region,
+                      seeds=_cli_args.seeds)
 
     else:
         env_vars = {"WANDB_API_KEY": wandb_key, "WANDB_ENTITY": "unsupervised-robotics"} if wandb_key else {}
