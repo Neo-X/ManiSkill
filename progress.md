@@ -54,9 +54,9 @@ Infrastructure (simulation, Docker, GCP, Vertex AI, wandb) is stable. Focus is n
 Motivated by the observation that PushText-v1 requires longer-horizon planning than StackCube-v1 (100-step episodes, multi-letter sequencing). Three axes under investigation:
 
 ### 6a. Discount factor
-- [x] `--gamma 0.95` (current default) — **running**
-- [ ] `--gamma 0.99` — longer effective horizon; expect slower early learning but better long-range credit assignment
-- [ ] `--gamma 0.995` — approaching undiscounted; may destabilize value estimates
+- [x] `--gamma 0.95` — **worse performance than 0.8**; higher gamma hurt rather than helped
+- [x] `--gamma 0.8` — best so far; shorter effective horizon appears to stabilize learning for this task
+- [ ] `--gamma 0.9` — middle ground worth trying if 0.8 is confirmed best
 
 ### 6b. Activation functions
 - [ ] `tanh` (current default) — bounded, smooth; known to saturate in deep nets

@@ -108,7 +108,11 @@ gcloud logging read "resource.type=\"ml_job\" AND resource.labels.job_id=\"<id>\
   --project=legoassembly --limit=100 --order=asc --format="value(textPayload)"
 ```
 
-wandb runs: `https://wandb.ai/unsupervised-robotics/ManiSkill`
+**wandb runs:** https://wandb.ai/unsupervised-robotics/ManiSkill
+- Entity: `unsupervised-robotics`
+- Project: `ManiSkill`
+- API key: read automatically from `~/.netrc` (written by `wandb login`) — never passed as a CLI argument
+- Each job logs to a run named by `--exp-name`; multi-seed launches append `-s{seed}` (e.g. `push-text-v1-l4-100M-s1`)
 
 ---
 

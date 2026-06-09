@@ -76,7 +76,9 @@ class Args:
     anneal_lr: bool = False
     """Toggle learning rate annealing for policy and value networks"""
     gamma: float = 0.95
-    """the discount factor gamma"""
+    """the discount factor gamma (starting value if gamma_final is set)"""
+    gamma_final: Optional[float] = None
+    """if set, linearly anneal gamma from gamma to gamma_final over training"""
     gae_lambda: float = 0.9
     """the lambda for the general advantage estimation"""
     num_minibatches: int = 32
@@ -108,8 +110,14 @@ class Args:
     """Number of units per layer in the policy and value networks"""
     activation: str = "tanh"
     """Activation function for hidden layers: tanh, relu, elu, leaky_relu, silu"""
+    critic_weight_decay: float = 0.0
+    """L2 weight decay for the critic optimizer (regularizes value function)"""
+    critic_dropout: float = 0.0
+    """Dropout probability applied between critic hidden layers (0 = disabled)"""
+    joint_loss: bool = False
+    """if True, actor and critic share one optimizer and one combined loss backward pass"""
 
-    eval_freq: int = 25
+    eval_freq: int = 250
     """evaluation frequency in terms of iterations"""
     save_train_video_freq: Optional[int] = None
     """frequency to save training videos in terms of iterations"""
@@ -161,6 +169,8 @@ class Agent(nn.Module):
             layers.append(act_cls())
             if args.use_layer_norm:
                 layers.append(nn.LayerNorm(args.num_units))
+            if args.critic_dropout > 0.0:
+                layers.append(nn.Dropout(p=args.critic_dropout))
 
         layers.append(layer_init(nn.Linear(args.num_units, 1), std=1.0))
         self.critic = nn.Sequential(*layers)
@@ -302,6 +312,9 @@ if __name__ == "__main__":
             config = vars(args)
             config["env_cfg"] = dict(**env_kwargs, num_envs=args.num_envs, env_id=args.env_id, reward_mode="normalized_dense", env_horizon=max_episode_steps, partial_reset=args.partial_reset)
             config["eval_env_cfg"] = dict(**env_kwargs, num_envs=args.num_eval_envs, env_id=args.env_id, reward_mode="normalized_dense", env_horizon=max_episode_steps, partial_reset=False)
+            gcp_job_id = os.environ.get("CLOUD_ML_JOB_ID")
+            if gcp_job_id:
+                config["gcp_job_id"] = gcp_job_id
             wandb.init(
                 project=args.wandb_project_name,
                 entity=args.wandb_entity,
@@ -331,7 +344,16 @@ if __name__ == "__main__":
         return os.path.join(out_dir, videos[-1]) if videos else None
 
     agent = Agent(envs).to(device)
-    optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
+    if args.joint_loss:
+        optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
+        actor_optimizer = critic_optimizer = optimizer
+    else:
+        optimizer = None
+        actor_optimizer = optim.Adam(
+            list(agent.actor_mean.parameters()) + [agent.actor_logstd],
+            lr=args.learning_rate, eps=1e-5,
+        )
+        critic_optimizer = optim.Adam(agent.critic.parameters(), lr=args.learning_rate, eps=1e-5, weight_decay=args.critic_weight_decay)
 
     gap_eval_env = ManiSkillVectorEnv(
         gym.make(args.env_id, num_envs=1, **env_kwargs),
@@ -380,16 +402,29 @@ if __name__ == "__main__":
             print("Evaluating")
             eval_obs, _ = eval_envs.reset()
             eval_metrics = defaultdict(list)
+            eval_step_rewards = []
+            eval_step_successes = []
             num_episodes = 0
             for _ in range(args.num_eval_steps):
                 with torch.no_grad():
                     eval_obs, eval_rew, eval_terminations, eval_truncations, eval_infos = eval_envs.step(agent.get_action(eval_obs, deterministic=True))
+                    eval_step_rewards.append(eval_rew.float().mean().item())
+                    if "success" in eval_infos:
+                        eval_step_successes.append(eval_infos["success"].float().mean().item())
                     if "final_info" in eval_infos:
                         mask = eval_infos["_final_info"]
                         num_episodes += mask.sum()
                         for k, v in eval_infos["final_info"]["episode"].items():
                             eval_metrics[k].append(v)
             print(f"Evaluated {args.num_eval_steps * args.num_eval_envs} steps resulting in {num_episodes} episodes")
+            if logger is not None:
+                mean_rew = float(np.mean(eval_step_rewards))
+                logger.add_scalar("eval/mean_reward", mean_rew, global_step)
+                print(f"eval_mean_reward={mean_rew:.4f}")
+                if eval_step_successes:
+                    mean_succ = float(np.mean(eval_step_successes))
+                    logger.add_scalar("eval/success_rate", mean_succ, global_step)
+                    print(f"eval_success_rate={mean_succ:.4f}")
             for k, v in eval_metrics.items():
                 mean = torch.stack(v).float().mean()
                 if logger is not None:
@@ -438,10 +473,18 @@ if __name__ == "__main__":
             torch.save(agent.state_dict(), model_path)
             print(f"model saved to {model_path}")
         # Annealing the rate if instructed to do so.
+        frac = 1.0 - (iteration - 1.0) / args.num_iterations
         if args.anneal_lr:
-            frac = 1.0 - (iteration - 1.0) / args.num_iterations
             lrnow = frac * args.learning_rate
-            optimizer.param_groups[0]["lr"] = lrnow
+            if args.joint_loss:
+                optimizer.param_groups[0]["lr"] = lrnow
+            else:
+                actor_optimizer.param_groups[0]["lr"] = lrnow
+                critic_optimizer.param_groups[0]["lr"] = lrnow
+        if args.gamma_final is not None:
+            gamma = args.gamma + (1.0 - frac) * (args.gamma_final - args.gamma)
+        else:
+            gamma = args.gamma
 
         rollout_time = time.time()
         for step in range(0, args.num_steps):
@@ -469,7 +512,7 @@ if __name__ == "__main__":
                                    "actions": [], "rewards": [], "seed": args.seed + env_idx})
                 _ep_return_buf[_done_mask] = 0.0
 
-            if "final_info" in infos:
+            if "final_info" in infos and iteration % args.plot_freq == 0:
                 final_info = infos["final_info"]
                 done_mask = infos["_final_info"]
                 for k, v in final_info["episode"].items():
@@ -511,12 +554,12 @@ if __name__ == "__main__":
                     value_term_sum = value_term_sum * next_not_done
 
                     lam_coef_sum = 1 + args.gae_lambda * lam_coef_sum
-                    reward_term_sum = args.gae_lambda * args.gamma * reward_term_sum + lam_coef_sum * rewards[t]
-                    value_term_sum = args.gae_lambda * args.gamma * value_term_sum + args.gamma * real_next_values
+                    reward_term_sum = args.gae_lambda * gamma * reward_term_sum + lam_coef_sum * rewards[t]
+                    value_term_sum = args.gae_lambda * gamma * value_term_sum + gamma * real_next_values
 
                     advantages[t] = (reward_term_sum + value_term_sum) / lam_coef_sum - values[t]
                 else:
-                    delta = rewards[t] + args.gamma * real_next_values - values[t]
+                    delta = rewards[t] + gamma * real_next_values - values[t]
                     advantages[t] = lastgaelam = delta + args.gamma * args.gae_lambda * next_not_done * lastgaelam # Here actually we should use next_not_terminated, but we don't have lastgamlam if terminated
             returns = advantages + values
 
@@ -577,12 +620,29 @@ if __name__ == "__main__":
                     v_loss = 0.5 * ((newvalue - b_returns[mb_inds]) ** 2).mean()
 
                 entropy_loss = entropy.mean()
-                loss = pg_loss - args.ent_coef * entropy_loss + v_loss * args.vf_coef
 
-                optimizer.zero_grad()
-                loss.backward()
-                nn.utils.clip_grad_norm_(agent.parameters(), args.max_grad_norm)
-                optimizer.step()
+                if args.joint_loss:
+                    loss = pg_loss - args.ent_coef * entropy_loss + args.vf_coef * v_loss
+                    optimizer.zero_grad()
+                    loss.backward()
+                    nn.utils.clip_grad_norm_(agent.parameters(), args.max_grad_norm)
+                    optimizer.step()
+                else:
+                    # Actor update — retain graph so the critic branch is still live
+                    actor_loss = pg_loss - args.ent_coef * entropy_loss
+                    actor_optimizer.zero_grad()
+                    actor_loss.backward(retain_graph=True)
+                    nn.utils.clip_grad_norm_(
+                        list(agent.actor_mean.parameters()) + [agent.actor_logstd],
+                        args.max_grad_norm,
+                    )
+                    actor_optimizer.step()
+
+                    # Critic update
+                    critic_optimizer.zero_grad()
+                    v_loss.backward()
+                    nn.utils.clip_grad_norm_(agent.critic.parameters(), args.max_grad_norm)
+                    critic_optimizer.step()
 
             if args.target_kl is not None and approx_kl > args.target_kl:
                 break
@@ -593,20 +653,23 @@ if __name__ == "__main__":
         var_y = np.var(y_true)
         explained_var = np.nan if var_y == 0 else 1 - np.var(y_true - y_pred) / var_y
 
-        logger.add_scalar("charts/learning_rate", optimizer.param_groups[0]["lr"], global_step)
-        logger.add_scalar("losses/value_loss", v_loss.item(), global_step)
-        logger.add_scalar("losses/policy_loss", pg_loss.item(), global_step)
-        logger.add_scalar("losses/entropy", entropy_loss.item(), global_step)
-        logger.add_scalar("losses/old_approx_kl", old_approx_kl.item(), global_step)
-        logger.add_scalar("losses/approx_kl", approx_kl.item(), global_step)
-        logger.add_scalar("losses/clipfrac", np.mean(clipfracs), global_step)
-        logger.add_scalar("losses/explained_variance", explained_var, global_step)
-        print("SPS:", int(global_step / (time.time() - start_time)))
-        logger.add_scalar("charts/SPS", int(global_step / (time.time() - start_time)), global_step)
-        logger.add_scalar("time/step", global_step, global_step)
-        logger.add_scalar("time/update_time", update_time, global_step)
-        logger.add_scalar("time/rollout_time", rollout_time, global_step)
-        logger.add_scalar("time/rollout_fps", args.num_envs * args.num_steps / rollout_time, global_step)
+        if iteration % args.plot_freq == 0:
+            _opt = optimizer if args.joint_loss else actor_optimizer
+            logger.add_scalar("charts/learning_rate", _opt.param_groups[0]["lr"], global_step)
+            logger.add_scalar("charts/gamma", gamma, global_step)
+            logger.add_scalar("losses/value_loss", v_loss.item(), global_step)
+            logger.add_scalar("losses/policy_loss", pg_loss.item(), global_step)
+            logger.add_scalar("losses/entropy", entropy_loss.item(), global_step)
+            logger.add_scalar("losses/old_approx_kl", old_approx_kl.item(), global_step)
+            logger.add_scalar("losses/approx_kl", approx_kl.item(), global_step)
+            logger.add_scalar("losses/clipfrac", np.mean(clipfracs), global_step)
+            logger.add_scalar("losses/explained_variance", explained_var, global_step)
+            logger.add_scalar("charts/SPS", int(global_step / (time.time() - start_time)), global_step)
+            logger.add_scalar("time/step", global_step, global_step)
+            logger.add_scalar("time/update_time", update_time, global_step)
+            logger.add_scalar("time/rollout_time", rollout_time, global_step)
+            logger.add_scalar("time/rollout_fps", args.num_envs * args.num_steps / rollout_time, global_step)
+            print("SPS:", int(global_step / (time.time() - start_time)))
         if iteration % args.plot_freq == 0 and gap_stats._returns:
             gap_stats.plot_gap(logger, global_step)
     if not args.evaluate:

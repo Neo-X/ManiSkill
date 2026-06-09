@@ -45,7 +45,7 @@ from xmanager import xm
 
 DOCKER_IMAGE  = "gberseth/maniskill-ppo:latest"
 GCP_PROJECT   = "legoassembly"
-GCP_ZONE      = "northamerica-northeast1-b"
+GCP_ZONE      = "northamerica-northeast1-c"
 GCP_REGION    = "northamerica-northeast1"
 
 # Absolute repo root — xm.Dockerfile resolves paths relative to the launcher
@@ -75,7 +75,7 @@ if _GCLOUD_SDK not in os.environ.get("PATH", ""):
 # Each job's cmd should only specify compute-scale constraints: env_id, num_envs,
 # total_timesteps, gpu/cpu count, and experiment name. Algorithm hyperparameters
 # (num_steps, update_epochs, gamma, activation, etc.) belong as defaults in
-# ppo_upstream.py — override them at launch time via extra args if needed.
+# ppo.py — override them at launch time via extra args if needed.
 
 JOBS = {
     # --- CPU jobs ---
@@ -109,10 +109,10 @@ JOBS = {
     ),
     "ppo-training-t4": dict(
         cmd=[
-            "python", "/app/examples/baselines/ppo/ppo_upstream.py",
+            "python", "/app/examples/baselines/ppo/ppo.py",
             "--track", "--wandb-project-name", "ManiSkill", "--wandb-entity", "unsupervised-robotics",
             "--env_id", "PushText-v1",
-            "--num_envs", "2048",
+            "--num_envs", "1800", "--num_eval_envs", "128",
             "--total_timesteps", "100000000",
             "--exp-name", "push-text-v1-t4-100M",
         ],
@@ -124,10 +124,10 @@ JOBS = {
     ),
     "ppo-training-l4": dict(
         cmd=[
-            "python", "/app/examples/baselines/ppo/ppo_upstream.py",
+            "python", "/app/examples/baselines/ppo/ppo.py",
             "--track", "--wandb-project-name", "ManiSkill", "--wandb-entity", "unsupervised-robotics",
             "--env_id", "PushText-v1",
-            "--num_envs", "4096",
+            "--num_envs", "4096", "--num_eval_envs", "128",
             "--total_timesteps", "100000000",
             "--exp-name", "push-text-v1-l4-100M",
         ],
