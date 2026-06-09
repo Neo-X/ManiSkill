@@ -72,6 +72,10 @@ if _GCLOUD_SDK not in os.environ.get("PATH", ""):
 # ---------------------------------------------------------------------------
 # Job definitions
 # ---------------------------------------------------------------------------
+# Each job's cmd should only specify compute-scale constraints: env_id, num_envs,
+# total_timesteps, gpu/cpu count, and experiment name. Algorithm hyperparameters
+# (num_steps, update_epochs, gamma, activation, etc.) belong as defaults in
+# ppo_upstream.py — override them at launch time via extra args if needed.
 
 JOBS = {
     # --- CPU jobs ---
@@ -89,34 +93,6 @@ JOBS = {
         machine_type="e2-standard-4",
         slurm_time=dt.timedelta(minutes=30),
     ),
-    "ppo-smoke-1m": dict(
-        cmd=[
-            "python", "/app/examples/baselines/ppo/ppo_bc.py",
-            "--track", "--wandb-project-name", "ManiSkill", "--wandb-entity", "unsupervised-robotics",
-            "--use-async-vector-env", "--num-envs", "8", "--no-capture-video",
-            "--num-eval-envs", "2", "--num-steps", "50", "--num-eval-steps", "100",
-            "--total-timesteps", "1000000", "--seed", "42",
-            "--exp-name", "ppo-smoke-1m",
-        ],
-        cpu=8,
-        ram_gib=16,
-        machine_type="e2-standard-8",
-        slurm_time=dt.timedelta(hours=2),
-    ),
-    "ppo-fixed-layout": dict(
-        cmd=[
-            "python", "/app/examples/baselines/ppo/ppo_bc.py",
-            "--track", "--wandb-project-name", "ManiSkill", "--wandb-entity", "unsupervised-robotics",
-            "--use-async-vector-env", "--num-envs", "8", "--no-capture-video",
-            "--num-eval-envs", "2", "--num-steps", "50", "--num-eval-steps", "200",
-            "--total-timesteps", "1000000", "--seed", "42", "--fixed-layout",
-            "--exp-name", "push-text-fixed-layout",
-        ],
-        cpu=8,
-        ram_gib=16,
-        machine_type="e2-standard-8",
-        slurm_time=dt.timedelta(hours=3),
-    ),
     "ppo-training": dict(
         cmd=[
             "python", "/app/examples/baselines/ppo/ppo_bc.py",
@@ -131,33 +107,13 @@ JOBS = {
         machine_type="e2-standard-8",
         slurm_time=dt.timedelta(hours=8),
     ),
-    # --- GPU jobs (Vertex AI / GCP Compute Engine T4) ---
-    "ppo-test-t4": dict(
-        cmd=[
-            "python", "/app/examples/baselines/ppo/ppo_upstream.py",
-            "--track", "--wandb-project-name", "ManiSkill", "--wandb-entity", "unsupervised-robotics",
-            "--env_id", "PushText-v1",
-            "--num_envs", "1024", "--no-capture-video",
-            "--num-eval-envs", "4", "--num-steps", "50", "--num_eval_steps", "100",
-            "--total_timesteps", "500000",
-            "--exp-name", "gcp-t4-ppo-test",
-        ],
-        cpu=8,
-        ram_gib=16,
-        gpu_type="t4",
-        gpu_count=1,
-        machine_type="n1-standard-8",   # used for gcloud compute engine fallback
-    ),
     "ppo-training-t4": dict(
         cmd=[
             "python", "/app/examples/baselines/ppo/ppo_upstream.py",
             "--track", "--wandb-project-name", "ManiSkill", "--wandb-entity", "unsupervised-robotics",
             "--env_id", "PushText-v1",
             "--num_envs", "2048",
-            "--num-eval-envs", "16", "--num-steps", "16", "--num_eval_steps", "100",
-            "--update_epochs", "8", "--num_minibatches", "32",
-            "--gamma", "0.8", "--total_timesteps", "100000000",
-            "--num-videos", "10",
+            "--total_timesteps", "100000000",
             "--exp-name", "push-text-v1-t4-100M",
         ],
         cpu=8,
@@ -166,34 +122,13 @@ JOBS = {
         gpu_count=1,
         machine_type="n1-standard-8",   # used for gcloud compute engine fallback
     ),
-    "ppo-video-test-l4": dict(
-        cmd=[
-            "python", "/app/examples/baselines/ppo/ppo_upstream.py",
-            "--track", "--wandb-project-name", "ManiSkill", "--wandb-entity", "unsupervised-robotics",
-            "--env_id", "PushText-v1",
-            "--num_envs", "256",
-            "--num-eval-envs", "4", "--num-steps", "16", "--num_eval_steps", "50",
-            "--update_epochs", "4", "--num_minibatches", "8",
-            "--gamma", "0.8", "--total_timesteps", "500000",
-            "--num-videos", "2",
-            "--exp-name", "ppo-video-test-l4",
-        ],
-        cpu=8,
-        ram_gib=16,
-        gpu_type="l4_24th",
-        gpu_count=1,
-        machine_type="n1-standard-8",
-    ),
     "ppo-training-l4": dict(
         cmd=[
             "python", "/app/examples/baselines/ppo/ppo_upstream.py",
             "--track", "--wandb-project-name", "ManiSkill", "--wandb-entity", "unsupervised-robotics",
             "--env_id", "PushText-v1",
             "--num_envs", "4096",
-            "--num-eval-envs", "16", "--num-steps", "16", "--num_eval_steps", "100",
-            "--update_epochs", "8", "--num_minibatches", "32",
-            "--gamma", "0.8", "--total_timesteps", "100000000",
-            "--num-videos", "10",
+            "--total_timesteps", "100000000",
             "--exp-name", "push-text-v1-l4-100M",
         ],
         cpu=8,
